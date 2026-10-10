@@ -1,0 +1,6 @@
+# Development-only dependencies. The container image installs
+# requirements.txt only; these are for running the test suite and
+# linting locally.
+anyio>=4.5
+pytest>=8.3
+ruff>=0.6

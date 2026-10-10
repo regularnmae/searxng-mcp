@@ -1,0 +1,36 @@
+[project]
+name = "searxng-mcp"
+version = "0.1.0"
+description = "Self-hosted SearXNG MCP server: web search plus page, PDF, feed and archive fetching."
+requires-python = ">=3.12"
+
+# Runtime dependencies are deliberately NOT duplicated here: the container
+# installs from requirements.txt, and two lists would drift. Install for
+# local development with:
+#   pip install -r requirements.txt -r requirements-dev.txt
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "anyio>=4.5",
+    "pytest>=8.3",
+    "ruff>=0.6",
+]
+
+[tool.pytest.ini_options]
+# server.py sits at the repo root and is imported as a top-level module.
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-ra"
+filterwarnings = [
+    "error::DeprecationWarning:mcp.*",
+]
+
+[tool.ruff]
+# The codebase has never been strict about 88; 100 keeps the existing
+# style honest while still catching the genuinely long lines.
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
