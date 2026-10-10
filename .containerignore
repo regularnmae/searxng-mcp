@@ -1,0 +1,17 @@
+# Keep the build context to what the image actually needs. Without
+# this, .git and every test file are shipped to the daemon on each
+# deploy.
+.git
+.gitignore
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+tests/
+scripts/
+.github/
+*.md
+deploy.sh
+Containerfile
+.containerignore

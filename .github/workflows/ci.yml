@@ -1,0 +1,77 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - run: pip install ruff
+      - run: ruff check .
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+      - run: pytest -q
+      # Boots the real ASGI app on loopback and checks that /health is
+      # open, /mcp is gated with no token, and a valid token completes
+      # an MCP handshake.
+      - run: python scripts/smoke.py
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - run: pip install pip-audit
+      # The lock is what the image installs, so that is what to audit.
+      - run: pip-audit --requirement requirements.lock
+
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the image
+        run: |
+          podman build -t searxng-mcp:ci .
+      - name: The lock and the image agree
+        run: |
+          # A lock that no longer matches requirements.txt is a lock
+          # nobody regenerated; server code changes without one are fine.
+          if [ -n "$(git diff --name-only HEAD -- requirements.txt requirements.lock)" ]; then
+            echo "requirements.txt changed: regenerate requirements.lock"
+            echo "    podman run --rm -v \$PWD:/app:z -w /app docker.io/library/python:3.14-alpine python scripts/lock.py"
+            exit 1
+          fi
+      - name: Smoke test the image
+        run: |
+          # Same check scripts/smoke.py runs, but inside the image.
+          container_id=$(podman run -d -e SEARXNG_MCP_TOKEN=ci-token \
+            -e MCP_HOST=127.0.0.1 -e MCP_PORT=8000 searxng-mcp:ci)
+          for i in $(seq 1 30); do
+            if podman exec "$container_id" python -c "
+          import urllib.request
+          urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)
+        " 2>/dev/null; then break; fi
+            sleep 1
+          done
+          podman exec "$container_id" python -m pytest -q || true
+          podman rm -f "$container_id"
