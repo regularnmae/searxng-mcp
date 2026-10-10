@@ -1,10 +1,13 @@
+import hmac
 import ipaddress
+import logging
 import os
 import re
 import socket
 import time
-from datetime import datetime, timezone
-from urllib.parse import urlparse
+from datetime import UTC, datetime
+from typing import Annotated, Literal
+from urllib.parse import urljoin, urlparse
 from zoneinfo import ZoneInfo
 
 import feedparser
@@ -13,9 +16,35 @@ from bs4 import BeautifulSoup
 from markdownify import markdownify
 from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
+from mcp.types import ToolAnnotations
+from pydantic import Field
 
-# Initialize MCPServer (v2 API; FastMCP was renamed in mcp 2.x)
-mcp = MCPServer("SearXNG Free Search")
+logger = logging.getLogger("searxng-mcp")
+
+# Initialize MCPServer (v2 API; FastMCP was renamed in mcp 2.x).
+# `instructions` is the one place to tell the model how these tools
+# chain together, and every MCP client surfaces it before the first
+# call.
+mcp = MCPServer(
+    "SearXNG Free Search",
+    instructions=(
+        "Search a self-hosted SearXNG, then read the pages it finds. "
+        "search_web takes a query and returns snippets and URLs; "
+        "webfetch reads one of those URLs as markdown; fetch_pdf reads "
+        "a PDF (an arxiv paper, say); fetch_rss reads a feed; "
+        "fetch_wayback finds an archived copy when the live page is "
+        "gone. Chain search_web -> webfetch for anything factual, and "
+        "prefer fetch_pdf over webfetch for a PDF URL."
+    ),
+    log_level=os.environ.get("LOG_LEVEL", "INFO").upper(),
+)
+
+# Every tool here only reads. Saying so lets a well-behaved client skip
+# a confirmation prompt before running one of them. The web tools are
+# open-world by construction; the time tools are not.
+_WEB_TOOLS = ToolAnnotations(read_only_hint=True, open_world_hint=True)
+_LOCAL_TOOLS = ToolAnnotations(read_only_hint=True, open_world_hint=False)
+
 
 # Reached over the podman npm-network (container name resolves
 # without any host publishing); SEARXNG_URL env overrides.
@@ -72,6 +101,13 @@ _wayback_tier_cooldowns: dict[str, float] = {}
 # intentional internal fetches, e.g. debugging from inside npm-network).
 WEBFETCH_ALLOW_PRIVATE = os.environ.get("WEBFETCH_ALLOW_PRIVATE", "") == "1"
 
+# Set to "1" to serve the endpoint with no token at all. Without it a
+# missing SEARXNG_MCP_TOKEN is a startup error, not a warning.
+MCP_ALLOW_ANONYMOUS = os.environ.get("MCP_ALLOW_ANONYMOUS", "") == "1"
+
+# Unauthenticated liveness path, for pollers that hold no token.
+HEALTH_PATH = "/health"
+
 # Browsers get blocked by plenty of sites; a plain UA avoids 403s.
 WEBFETCH_USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -85,6 +121,35 @@ _WEBFETCH_DROP_TAGS = [
     "aside", "form", "iframe", "svg", "button", "select",
 ]
 
+# Bytes that are never a page. Servers mislabel content often enough
+# that the declared type alone cannot be trusted, so the leading magic
+# bytes are checked as well -- the same way fetch_pdf decides it has
+# been handed a PDF at all. Decoding one of these and returning it as
+# text puts a few hundred kilobytes of replacement characters in the
+# model's context, so it is better to say what the response is.
+_WEBFETCH_BINARY_TYPES = (
+    "image/",
+    "audio/",
+    "video/",
+    "font/",
+    "application/octet-stream",
+    "application/pdf",
+    "application/zip",
+    "application/gzip",
+    "application/x-7z-compressed",
+    "application/wasm",
+)
+
+_WEBFETCH_BINARY_MAGIC = (
+    b"%PDF-",
+    b"\x89PNG",
+    b"\xff\xd8\xff",  # JPEG
+    b"GIF87a",
+    b"GIF89a",
+    b"PK\x03\x04",  # zip, and thus most OOXML
+    b"\x1f\x8b",  # gzip
+)
+
 
 def _assert_fetchable(url: str) -> None:
     """Reject URLs that scheme- or IP-wise cannot be public web pages.
@@ -93,6 +158,13 @@ def _assert_fetchable(url: str) -> None:
     bitcoind/monerod/lightningd/valkey/searxng and publishes 8000 on
     the LAN, so an unrestricted fetcher would turn any prompt
     injection in a fetched page into a probe of those services.
+
+    This is an allowlist, not a blocklist. An address is fetched only
+    when every address the host resolves to is globally routable, which
+    is what catches the ranges a blocklist tends to miss: CGNAT
+    (100.64.0.0/10), NAT64, benchmarking, documentation prefixes, and
+    IPv4 tunnelled inside IPv6.
+
     Raises ValueError with a human-readable reason.
     """
     parsed = urlparse(url)
@@ -114,15 +186,55 @@ def _assert_fetchable(url: str) -> None:
 
     for info in infos:
         ip = ipaddress.ip_address(info[4][0])
-        if (
-            ip.is_private
-            or ip.is_loopback
-            or ip.is_link_local
-            or ip.is_reserved
-            or ip.is_multicast
-            or ip.is_unspecified
-        ):
+        # `is_global` is the allowlist; multicast and reserved are the
+        # two classes Python still reports as global, so they are
+        # named rather than trusted.
+        if not ip.is_global or ip.is_multicast or ip.is_reserved:
+            # Worth a log line even when the refusal came from a
+            # redirect hop: something tried to point this server at an
+            # internal address, and that is what an injected prompt
+            # looks like.
+            logger.warning("refusing fetch of %s: internal address %s", url, ip)
             raise ValueError(f"refusing to fetch internal address {ip}")
+
+
+def _assert_redirect_target(response) -> None:
+    """Reject a redirect hop that points somewhere private.
+
+    `_assert_fetchable` only ever sees the URL the caller passed, and
+    the HTTP client follows redirects on its own -- so without this,
+    a page on the public internet that answers 302 with a Location
+    pointing at bitcoind:8332 or valkey:6379 walks straight into
+    npm-network. Registered as a response event hook, this runs once
+    per response *before* the next request is built, so a bad hop is
+    refused before anything is sent to it.
+    """
+    if not response.has_redirect_location:
+        return
+    location = response.headers.get("location", "")
+    if not location:
+        return
+    # Relative Locations mean the request URL, not the original one.
+    _assert_fetchable(urljoin(str(response.request.url), location))
+
+
+def _http_client(timeout: float = 15.0, *, transport=None) -> httpx2.Client:
+    """The one client configuration shared by every fetch tool.
+
+    Browser UA, redirect policy and byte caps live here so the tools do
+    not each half-remember them. `transport` is an injection point for
+    tests: the client it builds is the production client in every other
+    respect, same hooks and same redirect policy, pointed at a fake
+    wire instead of the network.
+    """
+    return httpx2.Client(
+        timeout=timeout,
+        follow_redirects=True,
+        max_redirects=5,
+        headers={"User-Agent": WEBFETCH_USER_AGENT},
+        transport=transport,
+        event_hooks={"response": [_assert_redirect_target]},
+    )
 
 
 def _fetch_bytes(
@@ -138,33 +250,30 @@ def _fetch_bytes(
     failures.
     """
     _assert_fetchable(url)
-    with httpx2.Client(
-        timeout=timeout,
-        follow_redirects=True,
-        max_redirects=5,
-        headers={"User-Agent": WEBFETCH_USER_AGENT},
-    ) as client:
-        with client.stream("GET", url) as response:
-            response.raise_for_status()
-            content_type = response.headers.get("content-type", "")
-            encoding = response.charset_encoding or "utf-8"
-            body = b""
-            for chunk in response.iter_bytes():
-                body += chunk
-                if len(body) >= max_bytes:
-                    body = body[:max_bytes]
-                    break
+    with (
+        _http_client(timeout=timeout) as client,
+        client.stream("GET", url) as response,
+    ):
+        response.raise_for_status()
+        content_type = response.headers.get("content-type", "")
+        encoding = response.charset_encoding or "utf-8"
+        body = b""
+        for chunk in response.iter_bytes():
+            body += chunk
+            if len(body) >= max_bytes:
+                body = body[:max_bytes]
+                break
     return body, content_type, encoding
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False, annotations=_WEB_TOOLS)
 def search_web(
     query: str,
-    max_results: int = 5,
+    max_results: Annotated[int, Field(ge=1, le=20)] = 5,
     categories: str = "",
     language: str = "",
-    time_range: str = "",
-    pageno: int = 1,
+    time_range: Literal["day", "week", "month", "year"] | None = None,
+    pageno: Annotated[int, Field(ge=1, le=10)] = 1,
 ) -> str:
     """Search the web using self-hosted SearXNG (no API keys required).
 
@@ -189,7 +298,7 @@ def search_web(
         params["language"] = language
     if time_range:
         params["time_range"] = time_range
-    if pageno and int(pageno) > 1:
+    if int(pageno) > 1:
         params["pageno"] = str(pageno)
 
     try:
@@ -237,13 +346,15 @@ def search_web(
         return "\n---\n".join(output)
 
     except httpx2.HTTPError as err:
+        logger.warning("SearXNG request to %s failed: %s", SEARXNG_URL, err)
         return f"HTTP error connecting to SearXNG: {err}"
     except Exception as e:
+        logger.exception("search_web raised")
         return f"Unexpected error during search: {str(e)}"
 
 
-@mcp.tool()
-def webfetch(url: str, max_chars: int = 20000) -> str:
+@mcp.tool(structured_output=False, annotations=_WEB_TOOLS)
+def webfetch(url: str, max_chars: Annotated[int, Field(ge=500, le=50000)] = 20000) -> str:
     """Fetch a web page and return its content as readable text/markdown.
 
     HTML pages are reduced to markdown; JSON and plain-text responses
@@ -259,16 +370,21 @@ def webfetch(url: str, max_chars: int = 20000) -> str:
     except ValueError as err:
         return f"Blocked: {err}"
     except httpx2.HTTPError as err:
+        logger.warning("webfetch of %s failed: %s", url, err)
         return f"HTTP error fetching {url}: {err}"
     except Exception as e:
+        logger.exception("webfetch of %s raised", url)
         return f"Unexpected error during fetch: {str(e)}"
+
+    if _is_binary_content(body, content_type):
+        return (
+            f"Not a readable page: the response is {content_type or 'unlabelled binary data'}.\n"
+            "webfetch reads HTML and plain text; use fetch_pdf for PDF documents."
+        )
 
     text = body.decode(encoding, errors="replace")
 
-    if "html" in content_type:
-        result = _html_to_markdown(text)
-    else:
-        result = text
+    result = _html_to_markdown(text) if "html" in content_type else text
 
     if len(result) > max_chars:
         result = result[:max_chars] + f"\n\n[truncated at {max_chars} chars]"
@@ -291,8 +407,19 @@ def _html_to_markdown(html: str) -> str:
     return markdown or "(no readable content found)"
 
 
-@mcp.tool()
-def fetch_pdf(url: str, max_pages: int = 20, max_chars: int = 20000) -> str:
+def _is_binary_content(body: bytes, content_type: str) -> bool:
+    """True when the response is a blob rather than something readable."""
+    if any(binary in content_type for binary in _WEBFETCH_BINARY_TYPES):
+        return True
+    return body.startswith(_WEBFETCH_BINARY_MAGIC)
+
+
+@mcp.tool(structured_output=False, annotations=_WEB_TOOLS)
+def fetch_pdf(
+    url: str,
+    max_pages: Annotated[int, Field(ge=1, le=100)] = 20,
+    max_chars: Annotated[int, Field(ge=500, le=50000)] = 20000,
+) -> str:
     """Fetch a PDF and extract its text (e.g. an arxiv paper).
 
     Args:
@@ -306,8 +433,10 @@ def fetch_pdf(url: str, max_pages: int = 20, max_chars: int = 20000) -> str:
     except ValueError as err:
         return f"Blocked: {err}"
     except httpx2.HTTPError as err:
+        logger.warning("fetch_pdf of %s failed: %s", url, err)
         return f"HTTP error fetching {url}: {err}"
     except Exception as e:
+        logger.exception("fetch_pdf of %s raised", url)
         return f"Unexpected error during fetch: {str(e)}"
 
     # Some servers serve PDFs as octet-stream, so the magic bytes are
@@ -345,8 +474,8 @@ def fetch_pdf(url: str, max_pages: int = 20, max_chars: int = 20000) -> str:
     return extracted
 
 
-@mcp.tool()
-def fetch_rss(url: str, max_items: int = 10) -> str:
+@mcp.tool(structured_output=False, annotations=_WEB_TOOLS)
+def fetch_rss(url: str, max_items: Annotated[int, Field(ge=1, le=50)] = 10) -> str:
     """Fetch an RSS/Atom feed and list recent items.
 
     Args:
@@ -358,8 +487,10 @@ def fetch_rss(url: str, max_items: int = 10) -> str:
     except ValueError as err:
         return f"Blocked: {err}"
     except httpx2.HTTPError as err:
+        logger.warning("fetch_rss of %s failed: %s", url, err)
         return f"HTTP error fetching {url}: {err}"
     except Exception as e:
+        logger.exception("fetch_rss of %s raised", url)
         return f"Unexpected error during fetch: {str(e)}"
 
     # Bytes are handed to feedparser directly: feeds lie about their
@@ -381,7 +512,7 @@ def fetch_rss(url: str, max_items: int = 10) -> str:
 
         date = ""
         if entry.get("published_parsed"):
-            stamp = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
+            stamp = datetime(*entry.published_parsed[:6], tzinfo=UTC)
             date = stamp.strftime("%Y-%m-%d %H:%M UTC")
         else:
             date = entry.get("published", "") or entry.get("updated", "")
@@ -512,7 +643,7 @@ def _wayback_from_archive_ph(client, url: str) -> tuple[str, str, str] | None:
     return ts, original, f"https://archive.ph/{ts}/{original}"
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False, annotations=_WEB_TOOLS)
 def fetch_wayback(url: str) -> str:
     """Look up the closest web-archive snapshot of a URL.
 
@@ -562,12 +693,27 @@ def fetch_wayback(url: str) -> str:
                 continue
             if hit:
                 ts, original, snapshot = hit
-                return _format_wayback_hit(
-                    name, snapshot, ts, _clean_original(original)
+                return (
+                    _format_wayback_hit(
+                        name, snapshot, ts, _clean_original(original)
+                    )
+                    + _degraded_note(notes)
                 )
             notes.append(f"{name}: no snapshot")
 
     return "No snapshot found. Sources tried: " + "; ".join(notes) + "."
+
+
+def _degraded_note(notes: list[str]) -> str:
+    """Explain which tiers were unavailable when a later one answered.
+
+    A hit is a hit, but "this came from archive.today because the
+    Internet Archive timed out" is worth knowing before the caller
+    trusts the snapshot date.
+    """
+    if not notes:
+        return ""
+    return "\n\nNote: other archive sources unavailable: " + "; ".join(notes)
 
 
 def _format_wayback_hit(
@@ -590,7 +736,7 @@ def _format_wayback_hit(
     )
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False, annotations=_LOCAL_TOOLS)
 def get_time(tz: str = "UTC") -> str:
     """Return the current time in a timezone.
 
@@ -611,7 +757,7 @@ def get_time(tz: str = "UTC") -> str:
     )
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False, annotations=_LOCAL_TOOLS)
 def convert_time(value: str, from_tz: str = "UTC", to_tz: str = "UTC") -> str:
     """Convert a datetime string from one timezone to another.
 
@@ -650,37 +796,63 @@ def convert_time(value: str, from_tz: str = "UTC", to_tz: str = "UTC") -> str:
 class BearerAuthMiddleware:
     """Pure-ASGI bearer auth in front of the streamable-HTTP app.
 
-    If SEARXNG_MCP_TOKEN is unset the middleware is bypassed (with a
-    warning) so a missing env var can't brick the server; the quadlet
-    always sets it.
+    The endpoint is published on the LAN, so a missing token is a hard
+    error rather than a warning: the previous behaviour served every
+    tool unauthenticated for as long as the env var was absent. Set
+    MCP_ALLOW_ANONYMOUS=1 to run it open on purpose, which is what
+    debugging from inside npm-network wants.
+
+    GET /health stays unauthenticated so a poller can say "up"
+    without holding the token; it says nothing else.
     """
 
     def __init__(self, app, token: str | None):
         self.app = app
         self.token = token or ""
         if not self.token:
-            print("WARNING: SEARXNG_MCP_TOKEN not set -- endpoint is UNAUTHENTICATED", flush=True)
+            if not MCP_ALLOW_ANONYMOUS:
+                raise RuntimeError(
+                    "SEARXNG_MCP_TOKEN is not set, and this endpoint is "
+                    "published on the LAN. Set the token, or set "
+                    "MCP_ALLOW_ANONYMOUS=1 to serve without authentication."
+                )
+            logger.warning(
+                "SEARXNG_MCP_TOKEN not set and MCP_ALLOW_ANONYMOUS=1: "
+                "endpoint is UNAUTHENTICATED"
+            )
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] == "http":
-            # Unauthenticated liveness endpoint for health pollers
-            # (OpenCode's background service probes GET /health
-            # without the bearer token). Leaks only "up" state.
-            if scope.get("path") == "/health":
-                from starlette.responses import JSONResponse
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
 
-                response = JSONResponse({"status": "ok"})
-                await response(scope, receive, send)
-                return
-            if self.token:
-                headers = dict(scope.get("headers") or [])
-                if headers.get(b"authorization") != f"Bearer {self.token}".encode():
-                    from starlette.responses import JSONResponse
+        if scope.get("path") == HEALTH_PATH:
+            from starlette.responses import JSONResponse
 
-                    response = JSONResponse({"error": "unauthorized"}, status_code=401)
-                    await response(scope, receive, send)
-                    return
+            response = JSONResponse({"status": "ok"})
+            await response(scope, receive, send)
+            return
+
+        if self.token and not self._authorised(scope):
+            from starlette.responses import JSONResponse
+
+            response = JSONResponse({"error": "unauthorized"}, status_code=401)
+            await response(scope, receive, send)
+            return
+
         await self.app(scope, receive, send)
+
+    def _authorised(self, scope) -> bool:
+        """Compare the presented credential in constant time."""
+        headers = dict(scope.get("headers") or [])
+        header = headers.get(b"authorization", b"").decode("latin-1").strip()
+        # RFC 7235 makes the scheme case-insensitive; a client sending
+        # "bearer <token>" is not a typo worth a 401, and neither is a
+        # stray space inside the header.
+        scheme, _, presented = header.partition(" ")
+        if scheme.lower() != "bearer":
+            return False
+        return hmac.compare_digest(presented.strip().encode(), self.token.encode())
 
 
 if __name__ == "__main__":
@@ -696,4 +868,11 @@ if __name__ == "__main__":
         ),
         os.environ.get("SEARXNG_MCP_TOKEN"),
     )
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+
+    # 0.0.0.0 is what the container publishes; loopback is what running
+    # it for a smoke test wants, hence the env overrides.
+    uvicorn.run(
+        app,
+        host=os.environ.get("MCP_HOST", "0.0.0.0"),
+        port=int(os.environ.get("MCP_PORT", "8000")),
+    )
