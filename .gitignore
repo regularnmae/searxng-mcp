@@ -3,5 +3,7 @@ __pycache__/
 .venv/
 .pytest_cache/
 .ruff_cache/
+# Written by the audit job in CI.
+requirements-audit.txt
 htmlcov/
 .coverage

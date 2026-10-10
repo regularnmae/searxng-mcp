@@ -4,27 +4,41 @@ version = "0.1.0"
 description = "Self-hosted SearXNG MCP server: web search plus page, PDF, feed and archive fetching."
 requires-python = ">=3.12"
 
-# Runtime dependencies are deliberately NOT duplicated here: the container
-# installs from requirements.txt, and two lists would drift. Install for
-# local development with:
-#   pip install -r requirements.txt -r requirements-dev.txt
-dependencies = []
+# Runtime dependencies. uv.lock pins the full closure, including hashes;
+# the image installs from a hash-verified export of it. Keep the ranges
+# permissive here and let the lock be exact.
+dependencies = [
+    "mcp>=2.3.0",
+    "httpx2>=2.13.1",
+    "markdownify>=0.14",
+    "beautifulsoup4>=4.13",
+    "pypdf>=5.0",
+    "feedparser>=6.0",
+    "tzdata",
+    # Pulled in transitively by mcp, but server.py imports it directly,
+    # so it is declared rather than borrowed.
+    "uvicorn>=0.31.1",
+]
 
-[project.optional-dependencies]
+# Dev-only. uv installs this group by default, which is what makes
+# `uv run pytest` work with no venv of your own.
+[dependency-groups]
 dev = [
     "anyio>=4.5",
     "pytest>=8.3",
     "ruff>=0.6",
 ]
 
+# server.py is a script at the repo root, not a package: without this uv
+# tries to build a wheel of the project itself and fails.
+[tool.uv]
+package = false
+
 [tool.pytest.ini_options]
 # server.py sits at the repo root and is imported as a top-level module.
 pythonpath = ["."]
 testpaths = ["tests"]
 addopts = "-ra"
-filterwarnings = [
-    "error::DeprecationWarning:mcp.*",
-]
 
 [tool.ruff]
 # The codebase has never been strict about 88; 100 keeps the existing

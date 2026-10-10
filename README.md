@@ -23,8 +23,15 @@ of them return structured content, so nothing is serialised twice.
 ## Running it
 
 ```sh
-pip install -r requirements.lock
-SEARXNG_MCP_TOKEN=<a long random token> python server.py
+uv sync                 # installs from uv.lock
+SEARXNG_MCP_TOKEN=<a long random token> uv run python server.py
+```
+
+Or, inside the container, with no uv anywhere:
+
+```sh
+podman build -t localhost/searxng-mcp:latest .
+podman run -e SEARXNG_MCP_TOKEN=<token> -p 8000:8000 localhost/searxng-mcp:latest
 ```
 
 It listens on `0.0.0.0:8000` and serves streamable HTTP at `/mcp`. `GET /health`
@@ -96,17 +103,38 @@ than as silence.
 
 ## Development
 
+Dependencies are managed with [uv](https://docs.astral.sh/uv/) from
+`pyproject.toml`. `uv.lock` is the exact closure — versions *and* hashes — and it is
+the only lock file: uv keeps the transitive pins that a `requirements.txt` never
+held.
+
 ```sh
-python -m venv .venv
-.venv/bin/pip install -r requirements.txt -r requirements-dev.txt
-.venv/bin/pytest -q          # 163 tests, ~1s, no network
-.venv/bin/ruff check .       # lint
-.venv/bin/python scripts/smoke.py   # boots the real app on loopback
+uv run pytest -q                       # 163 tests, ~1s, no network
+uv run ruff check .                    # lint
+uv run python scripts/smoke.py         # boots the real app on loopback
+uv run --python 3.14 pytest -q         # against the image's Python
+uv add <package>                       # changes pyproject.toml, then re-locks
 ```
 
-Tests import `server` and drive it through the SDK's in-memory
-`Client(mcp)` — no ports, no subprocesses. `scripts/smoke.py` is the one test
-that binds a socket, because that is the part the unit tests cannot see.
+`uv run` creates the virtualenv itself, so there is no `.venv/bin/...` path to
+remember and no `pip install -r requirements.txt` step — which is the reason
+`requirements.txt`, `requirements-dev.txt`, `requirements.lock` and
+`scripts/lock.py` are gone.
+
+Adding a dependency or changing a range means re-locking and committing
+`uv.lock`; CI rejects a commit where `uv.lock` no longer matches
+`pyproject.toml` (`uv lock --check`).
+
+### The image
+
+`uv` never reaches the running container: a build stage turns `uv.lock` into a
+hash-pinned requirements file, and the runtime stage installs it with plain
+`pip install --require-hashes`. No uv binary in the image, and the hashes are
+actually enforced rather than decorative.
+
+```sh
+podman build -t localhost/searxng-mcp:latest .
+```
 
 ### Adding a tool
 
@@ -123,15 +151,12 @@ redirect check come along.
 
 ## Deploying
 
-`Containerfile` installs `requirements.lock` and pins the base image by digest,
-so a rebuild is the same image. Regenerate the lock after changing
-`requirements.txt`:
-
-```sh
-podman run --rm -v "$PWD:/app:z" -w /app \
-  docker.io/library/python:3.14-alpine python scripts/lock.py
-```
+`Containerfile` pins the base image by digest and installs a hash-verified
+export of `uv.lock`, so a rebuild is the same image. `deploy.sh` rebuilds,
+restarts the quadlet service, and waits for the container's healthcheck to
+pass. Roll back with `git checkout <older-sha> && ./deploy.sh`.
 
 CI (`.github/workflows/ci.yml`) runs lint, the suite on 3.12 and 3.14,
-`pip-audit` against the lock, builds the image, and refuses a commit that
-changes `requirements.txt` without regenerating `requirements.lock`.
+`uv lock --check` to catch an un-regenerated lock, `pip-audit` against the
+export, builds the image, and asserts that no uv binary leaked into it.
+

@@ -1,7 +1,0 @@
-mcp>=2.3.0
-httpx2>=2.13.1
-markdownify>=0.14
-beautifulsoup4>=4.13
-pypdf>=5.0
-feedparser>=6.0
-tzdata
