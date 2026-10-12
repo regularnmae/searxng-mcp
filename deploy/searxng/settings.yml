@@ -1,0 +1,120 @@
+# SearXNG settings seeded into %h/data/searxng by deploy/install.sh on a
+# fresh host (an existing file is never overwritten). It MUST keep
+# `search.formats` containing `json`, or search_web gets a 403 and every
+# search fails -- see the README's "SearXNG setup".
+#
+# `secret_key` is deliberately blank here: install.sh substitutes a fresh
+# random key when it seeds this file, so no secret is committed.
+#
+# Read the documentation before extending the defaults:
+# https://docs.searxng.org/admin/settings/
+
+# Curated engine set for searxng-mcp (search_web's default categories are
+# general,it,q&a,science; "news" and "images" are also advertised). The
+# image's 352 default engines are filtered to the 28 below -- verified
+# responding from this instance on 2026-10-12. Everything else in the
+# packaged defaults (headers, suspended_times, ui, ...) is still merged.
+use_default_settings:
+  engines:
+    keep_only:
+      # general -- text web search
+      - duckduckgo
+      - swisscows
+      - yahoo
+      - mojeek            # currently "Suspended: access denied"; auto-retries
+      - wikipedia         # factual anchor
+      - google cse
+      # science -- arxiv pairs with the MCP's fetch_pdf tool
+      - arxiv
+      - pubmed
+      - europepmc
+      - semantic scholar
+      - google scholar
+      - pdbe
+      - openairedatasets
+      - openairepublications
+      # it
+      - github
+      - stackoverflow
+      - superuser
+      - askubuntu
+      - mdn
+      - mankier
+      - docker hub
+      # q&a
+      - discuss.python
+      # news
+      - duckduckgo news
+      - bing news
+      - wikinews
+      # images
+      - duckduckgo images
+      - bing images
+      - wikicommons.images
+
+# The package ships these off (mojeek/swisscows inactive: true, yahoo and
+# discuss.python disabled: true). keep_only alone keeps them out, so
+# re-enable them explicitly -- all verified responding before this change.
+engines:
+  - name: mojeek
+    inactive: false
+    disabled: false
+  - name: swisscows
+    inactive: false
+    disabled: false
+  - name: yahoo
+    inactive: false
+    disabled: false
+  - name: discuss.python
+    inactive: false
+    disabled: false
+
+server:
+  secret_key: ""
+  image_proxy: true
+  method: GET
+  public_instance: false
+  limiter: true
+
+valkey:
+  url: valkey://valkey:6379/0
+
+search:
+  formats:
+    - html
+    - json
+  default_lang: en
+  safe_search: 0
+  autocomplete: ""        # off: no autocomplete traffic to duckduckgo/brave/...
+  favicon_resolver: ""    # off: no favicon fetches
+
+outgoing:
+  request_timeout: 6.0    # was 5.0 (packaged default 3.0); engines run in parallel
+
+# NOTE: a `plugins:` block replaces the packaged plugin defaults wholesale,
+# so every plugin we keep must be re-listed here. self_info is the only
+# change -- it discloses the SearXNG version on /info, and :8080 is
+# published on the LAN.
+plugins:
+  searx.plugins.calculator.SXNGPlugin:
+    active: true
+  searx.plugins.hash_plugin.SXNGPlugin:
+    active: true
+  searx.plugins.unit_converter.SXNGPlugin:
+    active: true
+  searx.plugins.ahmia_filter.SXNGPlugin:
+    active: true
+  searx.plugins.hostnames.SXNGPlugin:
+    active: true
+  searx.plugins.time_zone.SXNGPlugin:
+    active: true
+  searx.plugins.tracker_url_remover.SXNGPlugin:
+    active: true          # cleaner URLs handed to webfetch/fetch_pdf
+  searx.plugins.self_info.SXNGPlugin:
+    active: false
+  searx.plugins.infinite_scroll.SXNGPlugin:
+    active: false
+  searx.plugins.oa_doi_rewrite.SXNGPlugin:
+    active: false
+  searx.plugins.tor_check.SXNGPlugin:
+    active: false

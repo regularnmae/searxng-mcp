@@ -1,0 +1,22 @@
+# Dependency of searxng.container: the backend for SearXNG's rate
+# limiter. Owned by this repo so the MCP server can be deployed whole.
+[Unit]
+Description=Valkey Cache (SearXNG Limiter Backend)
+After=network-online.target npm-network-network.service
+Requires=npm-network-network.service
+
+[Container]
+ContainerName=valkey
+Image=docker.io/valkey/valkey:9-alpine
+Network=npm-network.network
+
+# No PublishPort: only SearXNG reaches it, as valkey:6379 on
+# npm-network. It holds short-lived limiter counters only, so
+# no volume is needed (loss on restart is harmless).
+
+[Service]
+Restart=always
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target

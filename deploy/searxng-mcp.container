@@ -1,0 +1,38 @@
+# Quadlet unit for the MCP server itself. deploy/install.sh symlinks this
+# into ~/.config/containers/systemd/, where quadlet turns it into
+# searxng-mcp.service.
+[Unit]
+Description=SearXNG MCP Server (streamable HTTP)
+After=network-online.target npm-network-network.service searxng.service
+Requires=npm-network-network.service searxng.service
+
+[Container]
+ContainerName=searxng-mcp
+Image=localhost/searxng-mcp:latest
+Network=npm-network.network
+
+# Bearer token clients must present as `Authorization: Bearer <token>`.
+# The token lives OUTSIDE this repo in ~/.config/searxng-mcp/token.env
+# (mode 600), written by deploy/install.sh, so no secret is ever
+# committed -- only deploy/token.env.example is. The same value sits in
+# the Authorization header of ~/.config/opencode/opencode.json.
+EnvironmentFile=%h/.config/searxng-mcp/token.env
+
+# LAN access on 8000 (free on the host). Can be proxied
+# through NPM later like your other boltmesh.mooo.com hosts.
+PublishPort=8000:8000
+
+# Healthcheck: MCP initialize probe (authenticated). Makes a
+# wedged server visible/restartable instead of silently erroring.
+HealthCmd=python /app/healthcheck.py
+HealthInterval=30s
+HealthRetries=3
+HealthStartPeriod=10s
+HealthOnFailure=restart
+
+[Service]
+Restart=always
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target

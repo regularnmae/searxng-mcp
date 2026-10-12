@@ -1,0 +1,34 @@
+# The SearXNG instance search_web queries. Owned by this repo so the MCP
+# server can be deployed whole. Its settings live in %h/data/searxng;
+# deploy/install.sh seeds them (json format + valkey) only on a fresh
+# host -- see deploy/searxng/settings.yml.
+[Unit]
+Description=SearXNG Metasearch Engine
+After=network-online.target npm-network-network.service valkey.service
+Requires=npm-network-network.service valkey.service
+
+[Container]
+ContainerName=searxng
+Image=docker.io/searxng/searxng:latest
+Network=npm-network.network
+
+# Direct LAN access, like nginx-proxy-manager's 80/443.
+# 8080 is free on the host (nothing else binds it).
+# NPM can proxy it later without touching this file --
+# it is reachable as searxng:8080 on npm-network.
+PublishPort=8080:8080
+
+# Image entrypoint generates a default settings.yml with a
+# random secret_key on first start if the mount is empty.
+# :z label required (SELinux enforcing host), same as monerod.
+Volume=%h/data/searxng:/etc/searxng:z
+
+# The rate limiter is ON (settings.yml) -- it needs valkey, which is why
+# Requires=valkey.service above. Image defaults would leave it off.
+
+[Service]
+Restart=always
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target

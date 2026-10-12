@@ -45,9 +45,11 @@ It listens on `0.0.0.0:8000` and serves streamable HTTP at `/mcp`. `GET /health`
 is unauthenticated and answers `{"status":"ok"}` — nothing more, so a poller can
 say "up" without holding the token.
 
-The deployed container runs as `nobody` behind a rootless quadlet
-(`searxng-mcp.service`); `./deploy.sh` rebuilds, restarts, and waits for the
-container's healthcheck to pass. Roll back with
+The deployed container runs as `nobody` behind a rootless quadlet. The
+quadlet units live in `deploy/` and `./deploy/install.sh` links them into
+`~/.config/containers/systemd/`, seeds the token and (on a fresh host) the
+SearXNG settings, and reloads systemd; `./deploy.sh` runs that, rebuilds,
+restarts, and waits for the container's healthcheck to pass. Roll back with
 `git checkout <older-sha> && ./deploy.sh`.
 
 ### Configuration
@@ -163,10 +165,36 @@ guard, the byte cap and the redirect check come along.
 
 ## Deploying
 
+The whole stack is described by quadlet units in `deploy/` — the podman
+network, the Valkey limiter backend, the SearXNG instance and the MCP server
+itself — so a fresh checkout can deploy the server and everything it depends
+on:
+
+```sh
+./deploy/install.sh     # symlink units, seed token + SearXNG config, reload
+./deploy.sh             # install.sh + build image + restart + wait healthy
+```
+
+`install.sh` is idempotent and safe to re-run. It:
+
+- symlinks each unit from `deploy/` into `~/.config/containers/systemd/`
+  (quadlet follows symlinks), backing up any existing real file to `.bak`;
+- writes the bearer token to `~/.config/searxng-mcp/token.env` (mode 600),
+  reusing the token the running container already uses so existing clients
+  keep working, and only generating one when there is none. No token is ever
+  committed — the unit reads it with
+  `EnvironmentFile=%h/.config/searxng-mcp/token.env`;
+- seeds `~/data/searxng/settings.yml` and `limiter.toml` **only on a fresh
+  host** (an existing file is left alone). The settings enable the `json`
+  format `search_web` needs and wire the Valkey limiter; a random
+  `secret_key` is generated at seed time.
+
+Adding a unit means dropping it in `deploy/` and adding its name to `UNITS`
+in `install.sh`; `deploy/` is excluded from the image build context.
+
 `Containerfile` pins the base image by digest and installs a hash-verified
-export of `uv.lock`, so a rebuild is the same image. `deploy.sh` rebuilds,
-restarts the quadlet service, and waits for the container's healthcheck to
-pass. Roll back with `git checkout <older-sha> && ./deploy.sh`.
+export of `uv.lock`, so a rebuild is the same image. Roll back with
+`git checkout <older-sha> && ./deploy.sh`.
 
 CI (`.github/workflows/ci.yml`) runs lint, the suite on 3.12 and 3.14,
 `uv lock --check` to catch an un-regenerated lock, `uvx pip-audit` against the

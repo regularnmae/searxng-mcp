@@ -1,0 +1,27 @@
+# SearXNG bot-detection / rate-limiter config, seeded alongside
+# settings.yml (deploy/install.sh copies it only when absent). No
+# secrets, so it is committed as-is.
+[botdetection]
+ipv4_prefix = 32
+ipv6_prefix = 48
+
+# Granian serves :8080 directly -- no reverse proxy in front.
+trusted_proxies = []
+
+[botdetection.ip_limit]
+filter_link_local = true
+link_token = false
+
+[botdetection.ip_lists]
+block_ip = []
+pass_ip = [
+  # Traffic arriving via podman port publishing is NAT'd and appears
+  # to the container as coming from the npm-network gateway (10.89.0.1):
+  # that covers the host (MCP server, curl), every LAN client hitting
+  # 0.0.0.0:8080, and all containers on npm-network (incl. NPM later).
+  # Internet clients (if ever exposed) still get full botdetection.
+  '10.89.0.0/24',
+  '127.0.0.0/8',        # loopback inside the netns
+  '192.168.1.0/24',     # LAN, for direct-routed setups
+]
+pass_searxng_org = true

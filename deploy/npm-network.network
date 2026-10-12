@@ -1,0 +1,6 @@
+# The podman network the whole searxng-mcp stack shares. Vendored here
+# (rather than left only on the host) so a fresh checkout can deploy the
+# server and the containers it depends on together. deploy/install.sh
+# symlinks this into ~/.config/containers/systemd/.
+[Network]
+NetworkName=npm-network

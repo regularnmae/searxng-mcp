@@ -16,6 +16,12 @@ HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-180}"
 
 cd "$(dirname "$0")"
 
+# Refresh the quadlet units from deploy/ (idempotent) before restarting,
+# so a fresh clone or an edited unit is picked up. install.sh symlinks the
+# units, seeds the token env / SearXNG config on a fresh host, and reloads
+# systemd.
+./deploy/install.sh
+
 # Fail fast on syntax errors instead of deploying a broken image.
 python3 -m py_compile server.py readability.py wayback.py
 
