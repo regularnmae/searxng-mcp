@@ -29,6 +29,7 @@ RUN uv pip install --system --require-hashes -r requirements.txt \
     && python -m pip uninstall -y pip
 
 COPY server.py .
+COPY readability.py .
 COPY healthcheck.py .
 
 USER nobody

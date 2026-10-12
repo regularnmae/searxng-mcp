@@ -1,11 +1,15 @@
 # searxng-mcp — agent notes
 
-Single-module Python MCP server. `server.py` is the whole app (not a
-package); `healthcheck.py` is the container healthcheck probe. Shipped as
+Flat two-module Python MCP server (not a package). `server.py` is the app
+— config, tools, auth middleware — and `readability.py` is its pure,
+dependency-free HTML-to-markdown pass; `healthcheck.py` is the container
+healthcheck probe. Shipped as
 a rootless podman/quadlet container. Toolchain is uv only — no pip in CI,
-in the build, or in the image (CI asserts all three). Env vars, tool list
-and the security model are documented in `README.md`; don't re-derive them
-from the code.
+in the build, or in the image (CI asserts all three). `mcp` is the 2.x
+line: the app object is `MCPServer` (the v2 rename of `FastMCP`), and the
+HTTP dependency is `httpx2`, a separate distribution from `httpx` — don't
+rewrite an import to plain `httpx`. Env vars, tool list and the security
+model are documented in `README.md`; don't re-derive them from the code.
 
 ## Commands
 
@@ -45,10 +49,13 @@ host (it lives outside this repo). Rollback: `git checkout <older-sha> && ./depl
   that unit, or running the image bare, means `deploy.sh` never sees
   "healthy" and times out.
 - `.containerignore` excludes `tests/`, `scripts/`, `*.md` and `.git`, so
-  only `server.py` + `healthcheck.py` land in the image — don't expect
-  `pytest` or the smoke script inside a container.
-- The live server is reachable at `http://localhost:8000/mcp` (bearer token
-  in `~/.config/opencode/opencode.json`); `/health` is open.
+  only `server.py` + `readability.py` + `healthcheck.py` land in the image —
+  a new top-level module must be added to the `Containerfile`'s `COPY` lines
+  and to pyright's `include`, or it won't ship or typecheck.
+- The deployed server is wired into `~/.config/opencode/opencode.json` as a
+  remote MCP entry (currently `http://192.168.1.112:8000/mcp` with a bearer
+  token). `/health` is open and answers exactly `{"status":"ok"}`; any other
+  JSON means you reached a different service on port 8000.
 
 ## Testing quirks
 
@@ -77,6 +84,9 @@ host (it lives outside this repo). Rollback: `git checkout <older-sha> && ./depl
 
 ## Conventions the tests/CI enforce
 
+- Tool bodies are synchronous (`def`, not `async def`); anyio runs them on
+  worker threads, which is why the search cache is guarded by a
+  `threading.Lock`. Keep new tools sync.
 - Every text-only `@mcp.tool` must pass `structured_output=False` and
   `annotations=_WEB_TOOLS` / `_LOCAL_TOOLS`; `tests/test_schemas.py`
   asserts this and the exact set of seven tool names — adding a tool means
@@ -86,10 +96,10 @@ host (it lives outside this repo). Rollback: `git checkout <older-sha> && ./depl
   publish an output schema. Returning a `CallToolResult` (rather than a
   bare model) is what keeps the text block as markdown instead of the
   SDK serialising the whole model as pretty-printed JSON into it.
-- `webfetch` reduces HTML with a hand-rolled readability pass
-  (`_parse_html`: metadata first, then `_strip_boilerplate`, then
-  `_main_node`) rather than a library. Keep it dependency-free; the tests
-  pin article-vs-chrome selection and OG/Twitter/JSON-LD metadata.
+- `webfetch` reduces HTML with a hand-rolled readability pass in
+  `readability.py` (`_parse_html`: metadata first, then `_strip_boilerplate`,
+  then `_main_node`) rather than a library. Keep it dependency-free; the
+  tests pin article-vs-chrome selection and OG/Twitter/JSON-LD metadata.
 - Numeric args are bounded with `Annotated[int, Field(ge=…, le=…)]`, not
   validated in the body; closed sets use `Literal`. The docstring's `Args:`
   section is the model-visible contract, so it must describe the bounds.

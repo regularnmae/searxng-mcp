@@ -23,7 +23,7 @@ jobs:
         with:
           enable-cache: true
       # Config lives in [tool.pyright]: standard mode over server.py,
-      # healthcheck.py, tests and scripts.
+      # readability.py, healthcheck.py, tests and scripts.
       - run: uv run --frozen pyright
 
   test:
