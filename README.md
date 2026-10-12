@@ -127,10 +127,12 @@ Adding a dependency or changing a range means re-locking and committing
 
 ### The image
 
-`uv` never reaches the running container: a build stage turns `uv.lock` into a
-hash-pinned requirements file, and the runtime stage installs it with plain
-`pip install --require-hashes`. No uv binary in the image, and the hashes are
-actually enforced rather than decorative.
+`uv` is the only build tool, and it never reaches the running container: a
+build stage turns `uv.lock` into a hash-pinned requirements file, the runtime
+stage installs it with `uv pip install --system --require-hashes`, and both
+build tools — the uv binary and pip itself — are deleted in the same layer. No
+uv, no pip in the image, and the hashes are actually enforced rather than
+decorative.
 
 ```sh
 podman build -t localhost/searxng-mcp:latest .
@@ -157,6 +159,6 @@ restarts the quadlet service, and waits for the container's healthcheck to
 pass. Roll back with `git checkout <older-sha> && ./deploy.sh`.
 
 CI (`.github/workflows/ci.yml`) runs lint, the suite on 3.12 and 3.14,
-`uv lock --check` to catch an un-regenerated lock, `pip-audit` against the
-export, builds the image, and asserts that no uv binary leaked into it.
+`uv lock --check` to catch an un-regenerated lock, `uvx pip-audit` against the
+export, builds the image, and asserts that neither uv nor pip leaked into it.
 

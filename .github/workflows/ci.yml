@@ -54,8 +54,7 @@ jobs:
             --locked -o requirements-audit.txt
       - name: Audit
         run: |
-          pip install pip-audit
-          pip-audit --requirement requirements-audit.txt
+          uvx pip-audit@2.10.1 --requirement requirements-audit.txt
 
   image:
     runs-on: ubuntu-latest
@@ -64,13 +63,13 @@ jobs:
       - name: Build the image
         run: |
           podman build -t searxng-mcp:ci .
-      - name: uv is not in the runtime image
+      - name: Build tools are not in the runtime image
         run: |
           container_id=$(podman run -d -e SEARXNG_MCP_TOKEN=ci-token \
             -e MCP_HOST=127.0.0.1 -e MCP_PORT=8000 searxng-mcp:ci)
-          podman exec "$container_id" sh -c 'command -v uv' \
-            && { echo "uv leaked into the runtime image"; exit 1; } \
-            || echo "no uv in the runtime image"
+          podman exec "$container_id" sh -c 'command -v uv || command -v pip' \
+            && { echo "uv or pip leaked into the runtime image"; exit 1; } \
+            || echo "no uv or pip in the runtime image"
           podman exec "$container_id" python -c \
             'import mcp, httpx2, pypdf, uvicorn; print("deps present")'
           # /health open, everything else gated.
