@@ -69,6 +69,15 @@ async def client() -> AsyncIterator[Client]:
         yield c
 
 
+@pytest.fixture(autouse=True)
+def _clear_search_cache() -> Iterator[None]:
+    """search_web's cache is process-global; don't let it leak between
+    tests, which repoint SEARXNG_URL and mutate payloads."""
+    server._search_cache.clear()
+    yield
+    server._search_cache.clear()
+
+
 @pytest.fixture
 def mock_http(monkeypatch: pytest.MonkeyPatch) -> Callable[[Handler], None]:
     """Point every fetch tool at a canned in-memory wire.

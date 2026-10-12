@@ -21,6 +21,10 @@ Every tool is read-only. `search_web` and `webfetch` return their data both as
 readable text and as schema-validated structured content; the rest return text
 only, so nothing is serialised twice.
 
+`search_web` caches recent responses in process for `SEARCH_CACHE_TTL` seconds,
+and a query that is already in flight is not issued twice, so repeated and
+parallel identical searches share one upstream request.
+
 ## Running it
 
 ```sh
@@ -49,6 +53,8 @@ container's healthcheck to pass. Roll back with
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `SEARXNG_URL` | `http://searxng:8080/search` | The SearXNG instance to query |
+| `SEARCH_CACHE_TTL` | `60` | Seconds a `search_web` result is reused; `0` disables caching |
+| `SEARCH_CACHE_MAX` | `128` | Most `search_web` queries cached (LRU eviction); `0` disables |
 | `SEARXNG_MCP_TOKEN` | – | Bearer token. **Required** unless `MCP_ALLOW_ANONYMOUS=1` |
 | `MCP_HOST` / `MCP_PORT` | `0.0.0.0` / `8000` | Listen address |
 | `WEBFETCH_ALLOW_PRIVATE` | – | Set to `1` to disable the private-address guard |

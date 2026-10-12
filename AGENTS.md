@@ -12,7 +12,7 @@ from the code.
 ```sh
 uv run ruff check .            # lint (CI gate). No `ruff format` step; line-length 100, rules E,F,I,UP,B,SIM
 uv run pyright                 # typecheck (CI gate); config in [tool.pyright], standard mode, floor Python 3.12
-uv run pytest -q              # 169 tests, ~1s, no network
+uv run pytest -q              # 179 tests, ~4s, no network
 uv run pytest tests/test_guard.py -q          # focused
 uv run python scripts/smoke.py               # boots the real app on a free loopback port: /health, 401s, handshake
 uv run --python 3.14 pytest -q                # against the image's Python (base is 3.14-alpine; >=3.12, CI matrix 3.12+3.14)
@@ -66,6 +66,11 @@ host (it lives outside this repo). Rollback: `git checkout <older-sha> && ./depl
   `fetch_wayback` builds its own too (tests monkeypatch the three
   `_wayback_from_*` probes; the `dead_wayback_tiers` fixture makes them all
   report "no snapshot").
+- `search_web` results are cached process-globally, so an autouse fixture
+  in `conftest.py` clears the cache around every test — tests repoint
+  `SEARXNG_URL` and mutate the stub payload, and a stale entry would leak
+  between them. `tests/test_search_cache.py` drives `_SearchCache` directly
+  with a counting fake fetch and an injected clock.
 - Async tests need `@pytest.mark.anyio`; the backend fixture is in
   `conftest.py`. `pytest` runs with `pythonpath = ["."]`, which is why
   `import server` works — `server.py` is a top-level module.

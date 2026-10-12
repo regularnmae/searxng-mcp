@@ -4,7 +4,10 @@ import logging
 import os
 import re
 import socket
+import threading
 import time
+from collections import OrderedDict
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Annotated, Literal, get_args
 from urllib.parse import urljoin, urlparse
@@ -32,6 +35,22 @@ _LEVELS: tuple[_LogLevel, ...] = get_args(_LogLevel)
 def _log_level() -> _LogLevel:
     requested = os.environ.get("LOG_LEVEL", "INFO").upper()
     return requested if requested in _LEVELS else "INFO"
+
+
+def _env_float(name: str, default: float) -> float:
+    """A float env var, or the default when unset or unparseable.
+
+    A typo'd cache setting should not stop the server from starting, so
+    a bad value warns and falls back rather than raising at import.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning("ignoring non-numeric %s=%r; using %s", name, raw, default)
+        return default
 
 
 # Initialize MCPServer (v2 API; FastMCP was renamed in mcp 2.x).
@@ -67,6 +86,16 @@ SEARXNG_URL = os.environ.get("SEARXNG_URL", "http://searxng:8080/search")
 # general web tier plus technical/q&a/science engines
 # (stackoverflow, github, arxiv, wikipedia, pypi, ...).
 DEFAULT_CATEGORIES = "general,it,q&a,science"
+
+# --- search_web caching ----------------------------------------------
+# SearXNG answers the same query identically for a while, so search_web
+# keeps recent responses in process memory: a repeated query inside the
+# TTL window is served without an upstream request, and a second thread
+# asking for a query that is already being fetched waits for that fetch
+# instead of issuing another. Either knob at 0 (or below) disables it.
+SEARCH_TIMEOUT = 10.0
+SEARCH_CACHE_TTL = _env_float("SEARCH_CACHE_TTL", 60.0)
+SEARCH_CACHE_MAX = int(_env_float("SEARCH_CACHE_MAX", 128.0))
 
 # --- web content tools (webfetch, pdf, rss, wayback) -----------------
 
@@ -358,6 +387,111 @@ def _webfetch_error(url: str, message: str, content_type: str = "") -> CallToolR
     )
 
 
+# --- search_web cache ------------------------------------------------
+# Keyed on (instance, effective params) so two instances -- or the test
+# suite repointing SEARXNG_URL -- never collide. The value is the parsed
+# SearXNG JSON, so the text block and the structured content are rendered
+# from it identically whether it arrived over the wire or from memory.
+_SearchKey = tuple[str, tuple[tuple[str, str], ...]]
+
+
+class _SearchCache:
+    """Bounded TTL cache with in-flight de-duplication.
+
+    The tool is synchronous and runs on anyio's worker threads, so the
+    lock is held only for bookkeeping, never across a network call. A
+    second thread asking for a key that is already being fetched waits
+    for that fetch instead of issuing a duplicate. Nothing is cached on
+    failure, so a transient outage is not remembered for the whole TTL.
+    """
+
+    def __init__(
+        self,
+        ttl: float,
+        max_entries: int,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._ttl = ttl
+        self._max = max_entries
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._entries: OrderedDict[_SearchKey, tuple[float, dict]] = OrderedDict()
+        self._inflight: dict[_SearchKey, threading.Event] = {}
+
+    @property
+    def enabled(self) -> bool:
+        return self._ttl > 0 and self._max > 0
+
+    def clear(self) -> None:
+        with self._lock:
+            self._entries.clear()
+            self._inflight.clear()
+
+    def _live(self, key: _SearchKey) -> dict | None:
+        """The value for `key` if present and unexpired; caller holds the lock."""
+        entry = self._entries.get(key)
+        if entry is None:
+            return None
+        expires_at, data = entry
+        if self._clock() >= expires_at:
+            del self._entries[key]
+            return None
+        self._entries.move_to_end(key)  # LRU: most recent last
+        return data
+
+    def get_or_fetch(self, key: _SearchKey, fetch: Callable[[], dict]) -> dict:
+        """Return the response for `key`, fetching it at most once."""
+        if not self.enabled:
+            return fetch()
+
+        with self._lock:
+            cached = self._live(key)
+            if cached is not None:
+                logger.debug("search_web cache hit: %r", key[1])
+                return cached
+            event = self._inflight.get(key)
+            leader = event is None
+            if leader:
+                event = threading.Event()
+                self._inflight[key] = event
+
+        if not leader:
+            # Another thread is already fetching this key: wait for its
+            # result instead of issuing a duplicate. If it failed there is
+            # nothing cached, so fall through and fetch for ourselves.
+            logger.debug("search_web awaiting in-flight query: %r", key[1])
+            event.wait(SEARCH_TIMEOUT + 5.0)
+            with self._lock:
+                cached = self._live(key)
+            return cached if cached is not None else fetch()
+
+        try:
+            data = fetch()
+            # Store before the waiters below are woken, so they find it.
+            with self._lock:
+                self._entries[key] = (self._clock() + self._ttl, data)
+                self._entries.move_to_end(key)
+                while len(self._entries) > self._max:
+                    self._entries.popitem(last=False)
+            return data
+        finally:
+            # Always release the slot and wake waiters, success or not.
+            with self._lock:
+                self._inflight.pop(key, None)
+            event.set()
+
+
+_search_cache = _SearchCache(SEARCH_CACHE_TTL, SEARCH_CACHE_MAX)
+
+
+def _do_search(params: dict[str, str]) -> dict:
+    """One SearXNG JSON query; raises on transport or HTTP failure."""
+    with httpx2.Client(timeout=SEARCH_TIMEOUT) as client:
+        response = client.get(SEARXNG_URL, params=params)
+        response.raise_for_status()
+        return response.json()
+
+
 @mcp.tool(structured_output=True, annotations=_WEB_TOOLS)
 def search_web(
     query: str,
@@ -397,10 +531,8 @@ def search_web(
         params["pageno"] = str(pageno)
 
     try:
-        with httpx2.Client(timeout=10.0) as client:
-            response = client.get(SEARXNG_URL, params=params)
-            response.raise_for_status()
-            data = response.json()
+        key: _SearchKey = (SEARXNG_URL, tuple(sorted(params.items())))
+        data = _search_cache.get_or_fetch(key, lambda: _do_search(params))
     except httpx2.HTTPError as err:
         logger.warning("SearXNG request to %s failed: %s", SEARXNG_URL, err)
         return _search_error(f"HTTP error connecting to SearXNG: {err}")
