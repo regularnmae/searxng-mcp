@@ -17,8 +17,9 @@ Seven tools:
 | `get_time` | Current time in any IANA zone |
 | `convert_time` | Convert a datetime between two zones |
 
-Every tool is read-only, and the results are text for the model to read — none
-of them return structured content, so nothing is serialised twice.
+Every tool is read-only. `search_web` and `webfetch` return their data both as
+readable text and as schema-validated structured content; the rest return text
+only, so nothing is serialised twice.
 
 ## Running it
 
@@ -146,10 +147,11 @@ def my_tool(url: str) -> str:
     """What the model sees. Args: ..."""
 ```
 
-Three things to copy: `structured_output=False` so the result is sent once
-rather than twice; the annotations so well-behaved clients skip a confirmation
-prompt; and fetching through `_fetch_bytes` so the guard, the byte cap and the
-redirect check come along.
+Three things to copy: `structured_output=False` so a text result is sent once
+rather than twice (only `search_web` and `webfetch` opt into structured output,
+returning `Annotated[CallToolResult, <Model>]`); the annotations so well-behaved
+clients skip a confirmation prompt; and fetching through `_fetch_bytes` so the
+guard, the byte cap and the redirect check come along.
 
 ## Deploying
 

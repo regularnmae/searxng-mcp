@@ -167,3 +167,38 @@ async def test_reports_connection_failure(call, monkeypatch) -> None:
     monkeypatch.setattr(server, "SEARXNG_URL", f"http://{host}:{port}/search")
     text = await call("search_web", query="test query")
     assert "HTTP error" in text
+
+
+# --- structured content ----------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_structured_content_shape(client, searxng) -> None:
+    searxng.payload["suggestions"] = ["test query"]
+    searxng.payload["unresponsive_engines"] = [["google", "captcha detected"]]
+    result = await client.call_tool("search_web", {"query": "test query"})
+    structured = result.structured_content
+    assert structured["results"][0] == {
+        "title": "First hit",
+        "url": "https://example.com/1",
+        "snippet": "A snippet about testing.",
+        "engine": "duckduckgo",
+        "published": "2026-10-01T12:00:00",
+    }
+    # The second result carries no date, so the field is null, not absent.
+    assert structured["results"][1]["published"] is None
+    assert structured["suggestions"] == ["test query"]
+    assert structured["unresponsive_engines"] == [
+        {"engine": "google", "reason": "captcha detected"}
+    ]
+    assert structured["error"] is None
+
+
+@pytest.mark.anyio
+async def test_structured_content_reports_failure(client, monkeypatch) -> None:
+    with ThreadingHTTPServer(("127.0.0.1", 0), BaseHTTPRequestHandler) as httpd:
+        host, port = httpd.server_address[:2]
+    monkeypatch.setattr(server, "SEARXNG_URL", f"http://{host}:{port}/search")
+    result = await client.call_tool("search_web", {"query": "test query"})
+    assert result.structured_content["error"].startswith("HTTP error")
+    assert result.structured_content["results"] == []

@@ -12,7 +12,7 @@ from the code.
 ```sh
 uv run ruff check .            # lint (CI gate). No `ruff format` step; line-length 100, rules E,F,I,UP,B,SIM
 uv run pyright                 # typecheck (CI gate); config in [tool.pyright], standard mode, floor Python 3.12
-uv run pytest -q              # 163 tests, ~1s, no network
+uv run pytest -q              # 169 tests, ~1s, no network
 uv run pytest tests/test_guard.py -q          # focused
 uv run python scripts/smoke.py               # boots the real app on a free loopback port: /health, 401s, handshake
 uv run --python 3.14 pytest -q                # against the image's Python (base is 3.14-alpine; >=3.12, CI matrix 3.12+3.14)
@@ -72,10 +72,15 @@ host (it lives outside this repo). Rollback: `git checkout <older-sha> && ./depl
 
 ## Conventions the tests/CI enforce
 
-- Every `@mcp.tool` must pass `structured_output=False` and
-  `annotations=_WEB_TOOLS` / `_LOCAL_TOOLS`. `tests/test_schemas.py`
+- Every text-only `@mcp.tool` must pass `structured_output=False` and
+  `annotations=_WEB_TOOLS` / `_LOCAL_TOOLS`; `tests/test_schemas.py`
   asserts this and the exact set of seven tool names — adding a tool means
-  updating `TOOLS` there.
+  updating `TOOLS` there. `search_web` and `webfetch` are the deliberate
+  exceptions: they pass `structured_output=True` and annotate the return
+  as `Annotated[CallToolResult, <ResponseModel>]`, and are asserted to
+  publish an output schema. Returning a `CallToolResult` (rather than a
+  bare model) is what keeps the text block as markdown instead of the
+  SDK serialising the whole model as pretty-printed JSON into it.
 - Numeric args are bounded with `Annotated[int, Field(ge=…, le=…)]`, not
   validated in the body; closed sets use `Literal`. The docstring's `Args:`
   section is the model-visible contract, so it must describe the bounds.

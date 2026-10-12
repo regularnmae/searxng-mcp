@@ -13,6 +13,7 @@ redirect policy and every event hook intact and only replaces the wire.
 
 from __future__ import annotations
 
+import copy
 import json
 import threading
 import urllib.parse
@@ -154,8 +155,12 @@ class _Stub:
 
 @pytest.fixture
 def searxng(monkeypatch: pytest.MonkeyPatch) -> Iterator[_Stub]:
-    """Point the server at a loopback SearXNG stub."""
-    with _Stub(RESULTS) as stub:
+    """Point the server at a loopback SearXNG stub.
+
+    The payload is a fresh copy of RESULTS per test: tests mutate it, and
+    a shared dict would leak one test's edits into the next.
+    """
+    with _Stub(copy.deepcopy(RESULTS)) as stub:
         monkeypatch.setattr(server, "SEARXNG_URL", stub.search_url)
         yield stub
 

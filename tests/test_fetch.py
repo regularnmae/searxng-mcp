@@ -117,6 +117,42 @@ async def test_webfetch_empty_page(call, mock_http) -> None:
     assert "no readable content" in text
 
 
+@pytest.mark.anyio
+async def test_webfetch_structured_content(client, mock_http) -> None:
+    mock_http(lambda request: _html(PAGE))
+    result = await client.call_tool("webfetch", {"url": "http://93.184.216.34/docs"})
+    structured = result.structured_content
+    assert structured["url"] == "http://93.184.216.34/docs"
+    assert structured["content_type"] == "text/html"
+    assert structured["title"] == "Widget Docs"
+    assert structured["truncated"] is False
+    assert "# Widgets" in structured["content"]
+    assert structured["chars"] == len(structured["content"])
+    assert structured["error"] is None
+
+
+@pytest.mark.anyio
+async def test_webfetch_structured_truncation(client, mock_http) -> None:
+    mock_http(lambda request: _html("<p>" + "x" * 5000 + "</p>"))
+    result = await client.call_tool(
+        "webfetch", {"url": "http://93.184.216.34/long", "max_chars": 1000}
+    )
+    structured = result.structured_content
+    assert structured["truncated"] is True
+    assert "[truncated at 1000 chars]" in structured["content"]
+
+
+@pytest.mark.anyio
+async def test_webfetch_structured_error_for_binary(client, mock_http) -> None:
+    png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+    mock_http(lambda request: _bytes(png, "image/png"))
+    result = await client.call_tool("webfetch", {"url": "http://93.184.216.34/logo.png"})
+    structured = result.structured_content
+    assert structured["error"] is not None
+    assert structured["content"] == ""
+    assert structured["content_type"] == "image/png"
+
+
 # --- fetch_pdf ------------------------------------------------------
 
 

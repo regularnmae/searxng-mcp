@@ -16,8 +16,8 @@ from bs4 import BeautifulSoup
 from markdownify import markdownify
 from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
-from mcp.types import ToolAnnotations
-from pydantic import Field
+from mcp.types import CallToolResult, TextContent, ToolAnnotations
+from pydantic import BaseModel, Field
 
 logger = logging.getLogger("searxng-mcp")
 
@@ -279,7 +279,86 @@ def _fetch_bytes(
     return body, content_type, encoding
 
 
-@mcp.tool(structured_output=False, annotations=_WEB_TOOLS)
+# --- structured output for search_web and webfetch -------------------
+# These two tools return both a human-readable text block and the same
+# data as schema-validated structured content. They are the deliberate
+# exception to the "structured_output=False everywhere" rule (see the
+# note in tests/test_schemas.py): a caller that wants typed data can
+# read `structured_content`, and the text block still carries the
+# markdown the model reads. Returning a CallToolResult rather than a
+# bare model is what keeps that text block as markdown -- a bare model
+# return would make the SDK serialise the whole model, pretty-printed,
+# into the text block instead.
+
+
+class SearchResult(BaseModel):
+    """One SearXNG result, flattened for a typed client."""
+
+    title: str
+    url: str
+    snippet: str
+    engine: str
+    published: str | None = None
+
+
+class UnresponsiveEngine(BaseModel):
+    """An engine that dropped out this query, and the reason it gave."""
+
+    engine: str
+    reason: str
+
+
+class SearchWebResponse(BaseModel):
+    """Structured form of a `search_web` result.
+
+    `error` is set (with `results` empty) when the search could not be
+    completed; the same message sits in the text block, so a text-only
+    reader loses nothing.
+    """
+
+    results: list[SearchResult] = Field(default_factory=list)
+    suggestions: list[str] = Field(default_factory=list)
+    unresponsive_engines: list[UnresponsiveEngine] = Field(default_factory=list)
+    error: str | None = None
+
+
+class WebFetchResponse(BaseModel):
+    """Structured form of a `webfetch` result.
+
+    `content` is the final text (markdown for HTML, verbatim otherwise),
+    already truncated to `max_chars`; `truncated` says whether it was.
+    `error` is set (with `content` empty) for blocked, non-readable or
+    failed fetches.
+    """
+
+    url: str
+    content_type: str = ""
+    title: str | None = None
+    content: str = ""
+    truncated: bool = False
+    chars: int = 0
+    error: str | None = None
+
+
+def _search_error(message: str) -> CallToolResult:
+    """A `search_web` failure: same text as before, plus a typed error."""
+    model = SearchWebResponse(error=message)
+    return CallToolResult(
+        content=[TextContent(type="text", text=message)],
+        structured_content=model.model_dump(mode="json"),
+    )
+
+
+def _webfetch_error(url: str, message: str, content_type: str = "") -> CallToolResult:
+    """A `webfetch` failure: same text as before, plus a typed error."""
+    model = WebFetchResponse(url=url, content_type=content_type, error=message)
+    return CallToolResult(
+        content=[TextContent(type="text", text=message)],
+        structured_content=model.model_dump(mode="json"),
+    )
+
+
+@mcp.tool(structured_output=True, annotations=_WEB_TOOLS)
 def search_web(
     query: str,
     max_results: Annotated[int, Field(ge=1, le=20)] = 5,
@@ -287,8 +366,11 @@ def search_web(
     language: str = "",
     time_range: Literal["day", "week", "month", "year"] | None = None,
     pageno: Annotated[int, Field(ge=1, le=10)] = 1,
-) -> str:
+) -> Annotated[CallToolResult, SearchWebResponse]:
     """Search the web using self-hosted SearXNG (no API keys required).
+
+    Returns the results as readable text plus schema-validated
+    structured content.
 
     Args:
         query: The search query string.
@@ -319,59 +401,74 @@ def search_web(
             response = client.get(SEARXNG_URL, params=params)
             response.raise_for_status()
             data = response.json()
-
-        results = data.get("results", [])[:max_results]
-
-        output = []
-
-        # Query suggestions (spellcheck-style corrections from engines)
-        suggestions = data.get("suggestions")
-        if suggestions:
-            output.append("Did you mean: " + ", ".join(str(s) for s in suggestions[:5]))
-
-        if not results:
-            output.append(f"No search results found for '{query}'.")
-        else:
-            for r in results:
-                title = r.get("title", "No Title")
-                url = r.get("url", "")
-                content = r.get("content", "")
-                engine = r.get("engine", "unknown")
-                published = r.get("publishedDate") or r.get("pubdate")
-                block = (
-                    f"### {title}\n"
-                    f"**URL:** {url}\n"
-                    f"**Source Engine:** {engine}\n"
-                )
-                if published:
-                    block += f"**Published:** {published}\n"
-                block += f"**Snippet:** {content}\n"
-                output.append(block)
-
-        # Surface engines that dropped out this query (CAPTCHA,
-        # suspension, timeout) so the caller knows the result set
-        # is thinner than usual and why.
-        unresponsive = data.get("unresponsive_engines")
-        if unresponsive:
-            notes = ", ".join(f"{name} ({reason})" for name, reason in unresponsive[:8])
-            output.append(f"Note: engines unavailable this query: {notes}")
-
-        return "\n---\n".join(output)
-
     except httpx2.HTTPError as err:
         logger.warning("SearXNG request to %s failed: %s", SEARXNG_URL, err)
-        return f"HTTP error connecting to SearXNG: {err}"
+        return _search_error(f"HTTP error connecting to SearXNG: {err}")
     except Exception as e:
         logger.exception("search_web raised")
-        return f"Unexpected error during search: {str(e)}"
+        return _search_error(f"Unexpected error during search: {str(e)}")
+
+    results = [
+        SearchResult(
+            title=str(r.get("title", "No Title")),
+            url=str(r.get("url", "")),
+            snippet=str(r.get("content", "")),
+            engine=str(r.get("engine", "unknown")),
+            published=str(r.get("publishedDate") or r.get("pubdate") or "") or None,
+        )
+        for r in data.get("results", [])[:max_results]
+    ]
+
+    # Query suggestions (spellcheck-style corrections from engines).
+    suggestions = [str(s) for s in (data.get("suggestions") or [])[:5]]
+
+    # Engines that dropped out this query (CAPTCHA, suspension, timeout)
+    # so the caller knows the result set is thinner than usual and why.
+    unresponsive = [
+        UnresponsiveEngine(engine=str(name), reason=str(reason))
+        for name, reason in (data.get("unresponsive_engines") or [])[:8]
+    ]
+
+    output = []
+    if suggestions:
+        output.append("Did you mean: " + ", ".join(suggestions))
+    if not results:
+        output.append(f"No search results found for '{query}'.")
+    else:
+        for r in results:
+            block = (
+                f"### {r.title}\n"
+                f"**URL:** {r.url}\n"
+                f"**Source Engine:** {r.engine}\n"
+            )
+            if r.published:
+                block += f"**Published:** {r.published}\n"
+            block += f"**Snippet:** {r.snippet}\n"
+            output.append(block)
+    if unresponsive:
+        notes = ", ".join(f"{e.engine} ({e.reason})" for e in unresponsive)
+        output.append(f"Note: engines unavailable this query: {notes}")
+
+    model = SearchWebResponse(
+        results=results,
+        suggestions=suggestions,
+        unresponsive_engines=unresponsive,
+    )
+    return CallToolResult(
+        content=[TextContent(type="text", text="\n---\n".join(output))],
+        structured_content=model.model_dump(mode="json"),
+    )
 
 
-@mcp.tool(structured_output=False, annotations=_WEB_TOOLS)
-def webfetch(url: str, max_chars: Annotated[int, Field(ge=500, le=50000)] = 20000) -> str:
+@mcp.tool(structured_output=True, annotations=_WEB_TOOLS)
+def webfetch(
+    url: str, max_chars: Annotated[int, Field(ge=500, le=50000)] = 20000
+) -> Annotated[CallToolResult, WebFetchResponse]:
     """Fetch a web page and return its content as readable text/markdown.
 
     HTML pages are reduced to markdown; JSON and plain-text responses
-    pass through unchanged. Content is truncated to max_chars.
+    pass through unchanged. Content is truncated to max_chars. Also
+    returns the same data as schema-validated structured content.
 
     Args:
         url: The http(s) URL to fetch.
@@ -381,32 +478,49 @@ def webfetch(url: str, max_chars: Annotated[int, Field(ge=500, le=50000)] = 2000
     try:
         body, content_type, encoding = _fetch_bytes(url)
     except ValueError as err:
-        return f"Blocked: {err}"
+        return _webfetch_error(url, f"Blocked: {err}")
     except httpx2.HTTPError as err:
         logger.warning("webfetch of %s failed: %s", url, err)
-        return f"HTTP error fetching {url}: {err}"
+        return _webfetch_error(url, f"HTTP error fetching {url}: {err}")
     except Exception as e:
         logger.exception("webfetch of %s raised", url)
-        return f"Unexpected error during fetch: {str(e)}"
+        return _webfetch_error(url, f"Unexpected error during fetch: {str(e)}")
 
     if _is_binary_content(body, content_type):
-        return (
+        return _webfetch_error(
+            url,
             f"Not a readable page: the response is {content_type or 'unlabelled binary data'}.\n"
-            "webfetch reads HTML and plain text; use fetch_pdf for PDF documents."
+            "webfetch reads HTML and plain text; use fetch_pdf for PDF documents.",
+            content_type=content_type,
         )
 
     text = body.decode(encoding, errors="replace")
 
-    result = _html_to_markdown(text) if "html" in content_type else text
+    if "html" in content_type:
+        title, result = _html_to_markdown(text)
+    else:
+        title, result = None, text
 
-    if len(result) > max_chars:
+    truncated = len(result) > max_chars
+    if truncated:
         result = result[:max_chars] + f"\n\n[truncated at {max_chars} chars]"
 
-    return result
+    model = WebFetchResponse(
+        url=url,
+        content_type=content_type,
+        title=title,
+        content=result,
+        truncated=truncated,
+        chars=len(result),
+    )
+    return CallToolResult(
+        content=[TextContent(type="text", text=result)],
+        structured_content=model.model_dump(mode="json"),
+    )
 
 
-def _html_to_markdown(html: str) -> str:
-    """Reduce an HTML document to title + markdown body text."""
+def _html_to_markdown(html: str) -> tuple[str | None, str]:
+    """Reduce an HTML document to (page title, markdown body text)."""
     soup = BeautifulSoup(html, "html.parser")
     for tag in soup(_WEBFETCH_DROP_TAGS):
         tag.decompose()
@@ -416,8 +530,8 @@ def _html_to_markdown(html: str) -> str:
 
     title = soup.title.get_text(strip=True) if soup.title else ""
     if title and title not in markdown[: len(title) + 64]:
-        return f"# {title}\n\n{markdown}"
-    return markdown or "(no readable content found)"
+        markdown = f"# {title}\n\n{markdown}"
+    return (title or None), (markdown or "(no readable content found)")
 
 
 def _is_binary_content(body: bytes, content_type: str) -> bool:
