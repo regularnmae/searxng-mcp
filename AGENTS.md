@@ -12,7 +12,7 @@ from the code.
 ```sh
 uv run ruff check .            # lint (CI gate). No `ruff format` step; line-length 100, rules E,F,I,UP,B,SIM
 uv run pyright                 # typecheck (CI gate); config in [tool.pyright], standard mode, floor Python 3.12
-uv run pytest -q              # 179 tests, ~4s, no network
+uv run pytest -q              # 182 tests, ~2s, no network
 uv run pytest tests/test_guard.py -q          # focused
 uv run python scripts/smoke.py               # boots the real app on a free loopback port: /health, 401s, handshake
 uv run --python 3.14 pytest -q                # against the image's Python (base is 3.14-alpine; >=3.12, CI matrix 3.12+3.14)

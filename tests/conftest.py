@@ -39,6 +39,9 @@ RESULTS = {
             "url": "https://example.com/1",
             "content": "A snippet about testing.",
             "engine": "duckduckgo",
+            "engines": ["duckduckgo"],
+            "score": 3.5,
+            "thumbnail": "https://example.com/thumb.png",
             "publishedDate": "2026-10-01T12:00:00",
         },
         {
@@ -46,12 +49,27 @@ RESULTS = {
             "url": "https://example.com/2",
             "content": "Another snippet.",
             "engine": "stackoverflow",
+            "engines": ["stackoverflow"],
+            # A relative thumbnail is not a URL a client can fetch, so the
+            # tool must drop it.
+            "thumbnail": "/image_proxy?url=secret",
         },
         {
             "title": "Third hit",
             "url": "https://example.com/3",
             "content": "Never returned.",
             "engine": "wikipedia",
+            "engines": ["wikipedia"],
+        },
+        # Same page as the first hit, reached through a bare www host and
+        # a campaign link: merges onto it and adds the google engine.
+        {
+            "title": "First hit (www)",
+            "url": "https://www.example.com/1/?utm_source=news#top",
+            "content": "Duplicate snippet.",
+            "engine": "google",
+            "engines": ["google"],
+            "score": 2.0,
         },
     ],
 }

@@ -65,6 +65,25 @@ async def test_empty_categories_fall_back_to_the_default(call, searxng) -> None:
     assert params["categories"] == server.DEFAULT_CATEGORIES
 
 
+@pytest.mark.anyio
+async def test_engines_drop_the_default_categories(call, searxng) -> None:
+    """With engines and no categories, a categories param would union the
+    whole category back in (SearXNG's parse_generic), so it is omitted
+    and only the requested engines run."""
+    await call("search_web", query="mcp", engines="google,duckduckgo")
+    (params,) = searxng.queries
+    assert params["engines"] == "google,duckduckgo"
+    assert "categories" not in params
+
+
+@pytest.mark.anyio
+async def test_engines_and_categories_are_both_sent(call, searxng) -> None:
+    await call("search_web", query="mcp", engines="google", categories="news")
+    (params,) = searxng.queries
+    assert params["engines"] == "google"
+    assert params["categories"] == "news"
+
+
 # --- rendering -------------------------------------------------------
 
 
@@ -73,7 +92,10 @@ async def test_results_are_rendered(call, searxng) -> None:
     text = await call("search_web", query="test query")
     assert "### First hit" in text
     assert "**URL:** https://example.com/1" in text
-    assert "**Source Engine:** duckduckgo" in text
+    # The first hit was found by two engines, so the merged list is shown.
+    assert "**Engines:** duckduckgo, google" in text
+    # A single-engine result keeps the singular label.
+    assert "**Source Engine:** stackoverflow" in text
     assert "**Published:** 2026-10-01T12:00:00" in text
     assert "**Snippet:** A snippet about testing." in text
     assert "Second hit" in text
@@ -93,6 +115,17 @@ async def test_missing_published_date_is_omitted(call, searxng) -> None:
     text = await call("search_web", query="test query")
     block = text.split("\n---\n")[1]
     assert "**Published:**" not in block
+
+
+@pytest.mark.anyio
+async def test_near_duplicate_results_are_merged(call, searxng) -> None:
+    """The stub returns example.com/1 twice -- bare, and via a www host
+    with a campaign link. They collapse to one hit listing both engines."""
+    text = await call("search_web", query="test query")
+    assert text.count("https://example.com/1") == 1
+    assert "www.example.com" not in text
+    assert "utm_source" not in text
+    assert "Duplicate snippet." not in text
 
 
 @pytest.mark.anyio
@@ -183,10 +216,17 @@ async def test_structured_content_shape(client, searxng) -> None:
         "url": "https://example.com/1",
         "snippet": "A snippet about testing.",
         "engine": "duckduckgo",
+        "engines": ["duckduckgo", "google"],
         "published": "2026-10-01T12:00:00",
+        "score": 3.5,
+        "thumbnail": "https://example.com/thumb.png",
     }
-    # The second result carries no date, so the field is null, not absent.
+    assert len(structured["results"]) == 3  # the near-duplicate was merged
+    # The second result carries no date or score, so those are null; its
+    # thumbnail was relative, so it is dropped rather than passed on.
     assert structured["results"][1]["published"] is None
+    assert structured["results"][1]["score"] is None
+    assert structured["results"][1]["thumbnail"] is None
     assert structured["suggestions"] == ["test query"]
     assert structured["unresponsive_engines"] == [
         {"engine": "google", "reason": "captcha detected"}

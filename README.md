@@ -9,7 +9,7 @@ Seven tools:
 
 | Tool | What it does |
 | --- | --- |
-| `search_web` | Search SearXNG; returns titles, URLs, source engine, publication date and snippets |
+| `search_web` | Search SearXNG; returns titles, URLs, the engines that found each hit, publication date and snippets. Near-duplicate URLs are merged (http/https, `www.`, trailing slash, fragment, tracking params) and every source engine is kept |
 | `webfetch` | Read a page as markdown; HTML is reduced, JSON and text pass through |
 | `fetch_pdf` | Extract text from a PDF, page by page (an arxiv paper, say) |
 | `fetch_rss` | List recent items from an RSS or Atom feed |
@@ -23,7 +23,9 @@ only, so nothing is serialised twice.
 
 `search_web` caches recent responses in process for `SEARCH_CACHE_TTL` seconds,
 and a query that is already in flight is not issued twice, so repeated and
-parallel identical searches share one upstream request.
+parallel identical searches share one upstream request. It can also be pointed
+at specific engines with `engines="google,duckduckgo"`; when `categories` is
+left empty, only those engines run.
 
 ## Running it
 

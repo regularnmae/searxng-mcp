@@ -10,7 +10,7 @@ from collections import OrderedDict
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Annotated, Literal, get_args
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunsplit
 from zoneinfo import ZoneInfo
 
 import feedparser
@@ -321,13 +321,23 @@ def _fetch_bytes(
 
 
 class SearchResult(BaseModel):
-    """One SearXNG result, flattened for a typed client."""
+    """One SearXNG result, flattened for a typed client.
+
+    `engine` is the primary (first) engine; `engines` is every engine that
+    found the page after SearXNG's and our own merging. `score` is
+    SearXNG's ranking weight (engine-weighted, not comparable across
+    engines); `thumbnail` is only set when it is an absolute URL a client
+    can actually fetch.
+    """
 
     title: str
     url: str
     snippet: str
     engine: str
+    engines: list[str] = Field(default_factory=list)
     published: str | None = None
+    score: float | None = None
+    thumbnail: str | None = None
 
 
 class UnresponsiveEngine(BaseModel):
@@ -367,6 +377,76 @@ class WebFetchResponse(BaseModel):
     truncated: bool = False
     chars: int = 0
     error: str | None = None
+
+
+# Query parameters that only track the referrer. Stripped when building
+# the de-duplication key so a page reached through a campaign link
+# collapses onto its plain URL.
+_TRACKING_PARAMS = frozenset({"fbclid", "gclid", "mc_cid", "mc_eid", "igshid"})
+
+
+def _canonical_url(url: str) -> str:
+    """A de-duplication key blind to scheme, www, trailing slash, fragment
+    and tracking params -- the near-duplicates SearXNG's own merge key
+    leaves behind (it ignores only the scheme)."""
+    parsed = urlparse(url)
+    netloc = parsed.netloc.lower()
+    if netloc.startswith("www."):
+        netloc = netloc[4:]
+    query = [
+        (k, v)
+        for k, v in parse_qsl(parsed.query, keep_blank_values=True)
+        if k.lower() not in _TRACKING_PARAMS and not k.lower().startswith("utm_")
+    ]
+    path = parsed.path.rstrip("/") or "/"
+    return urlunsplit(("", netloc, path, urlencode(query), ""))
+
+
+def _result_from_raw(raw: dict) -> SearchResult:
+    """Map one SearXNG JSON result onto the model."""
+    listed = raw.get("engines")
+    engines = [str(e) for e in listed] if isinstance(listed, list) and listed else []
+    primary = str(raw.get("engine") or "")
+    if primary and primary not in engines:
+        engines.insert(0, primary)
+    score = raw.get("score")
+    thumbnail = str(raw.get("thumbnail") or "")
+    return SearchResult(
+        title=str(raw.get("title", "No Title")),
+        url=str(raw.get("url", "")),
+        snippet=str(raw.get("content", "")),
+        engine=primary or "unknown",
+        engines=engines,
+        published=str(raw.get("publishedDate") or raw.get("pubdate") or "") or None,
+        score=float(score) if isinstance(score, int | float) else None,
+        thumbnail=thumbnail if thumbnail.startswith(("http://", "https://")) else None,
+    )
+
+
+def _merge_duplicates(results: list[SearchResult]) -> list[SearchResult]:
+    """Collapse results that differ only by the `_canonical_url` edits.
+
+    Keeps the first (score-ordered) title and snippet, unions the engine
+    list so no source is lost, and takes the best score. Order is first
+    appearance, which is SearXNG's ranking.
+    """
+    merged: dict[str, SearchResult] = {}
+    order: list[str] = []
+    for result in results:
+        key = _canonical_url(result.url)
+        existing = merged.get(key)
+        if existing is None:
+            merged[key] = result
+            order.append(key)
+            continue
+        for engine in result.engines:
+            if engine not in existing.engines:
+                existing.engines.append(engine)
+        if result.score is not None:
+            existing.score = max(existing.score or 0.0, result.score)
+        existing.published = existing.published or result.published
+        existing.thumbnail = existing.thumbnail or result.thumbnail
+    return [merged[key] for key in order]
 
 
 def _search_error(message: str) -> CallToolResult:
@@ -497,6 +577,7 @@ def search_web(
     query: str,
     max_results: Annotated[int, Field(ge=1, le=20)] = 5,
     categories: str = "",
+    engines: str = "",
     language: str = "",
     time_range: Literal["day", "week", "month", "year"] | None = None,
     pageno: Annotated[int, Field(ge=1, le=10)] = 1,
@@ -512,6 +593,12 @@ def search_web(
         categories: Comma-separated SearXNG categories to search.
             Defaults to general,it,q&a,science. Examples: "news",
             "images", "general,news", "it".
+        engines: Optional comma-separated engine names to restrict the
+            search to, e.g. "google,duckduckgo". When set and
+            `categories` is empty, only these engines run; if
+            `categories` is also given, SearXNG runs those engines as
+            well (the two lists are unioned, not intersected). Unknown
+            names are ignored by SearXNG.
         language: Optional language code for results, e.g. "en",
             "de", "fr". Empty means SearXNG's instance default.
         time_range: Optional recency filter: "day", "week",
@@ -521,8 +608,15 @@ def search_web(
     params = {
         "q": query,
         "format": "json",
-        "categories": categories or DEFAULT_CATEGORIES,
     }
+    if engines:
+        params["engines"] = engines
+        # Sending categories too would union the category's engines in
+        # (see SearXNG's parse_generic); only forward it when asked.
+        if categories:
+            params["categories"] = categories
+    else:
+        params["categories"] = categories or DEFAULT_CATEGORIES
     if language:
         params["language"] = language
     if time_range:
@@ -540,16 +634,11 @@ def search_web(
         logger.exception("search_web raised")
         return _search_error(f"Unexpected error during search: {str(e)}")
 
-    results = [
-        SearchResult(
-            title=str(r.get("title", "No Title")),
-            url=str(r.get("url", "")),
-            snippet=str(r.get("content", "")),
-            engine=str(r.get("engine", "unknown")),
-            published=str(r.get("publishedDate") or r.get("pubdate") or "") or None,
-        )
-        for r in data.get("results", [])[:max_results]
-    ]
+    # Merge near-duplicates before the cut so merged hits don't shrink
+    # the result set below max_results.
+    results = _merge_duplicates(
+        [_result_from_raw(r) for r in data.get("results", [])]
+    )[:max_results]
 
     # Query suggestions (spellcheck-style corrections from engines).
     suggestions = [str(s) for s in (data.get("suggestions") or [])[:5]]
@@ -568,11 +657,11 @@ def search_web(
         output.append(f"No search results found for '{query}'.")
     else:
         for r in results:
-            block = (
-                f"### {r.title}\n"
-                f"**URL:** {r.url}\n"
-                f"**Source Engine:** {r.engine}\n"
-            )
+            block = f"### {r.title}\n**URL:** {r.url}\n"
+            if len(r.engines) > 1:
+                block += f"**Engines:** {', '.join(r.engines)}\n"
+            else:
+                block += f"**Source Engine:** {r.engine}\n"
             if r.published:
                 block += f"**Published:** {r.published}\n"
             block += f"**Snippet:** {r.snippet}\n"
