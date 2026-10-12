@@ -1,9 +1,9 @@
 # searxng-mcp — agent notes
 
-Flat two-module Python MCP server (not a package). `server.py` is the app
-— config, tools, auth middleware — and `readability.py` is its pure,
-dependency-free HTML-to-markdown pass; `healthcheck.py` is the container
-healthcheck probe. Shipped as
+Flat three-module Python MCP server (not a package). `server.py` is the app
+— config, tools, auth middleware; `readability.py` is its pure
+HTML-to-markdown pass and `wayback.py` its archive-lookup tiers, both
+dependency-free; `healthcheck.py` is the container healthcheck probe. Shipped as
 a rootless podman/quadlet container. Toolchain is uv only — no pip in CI,
 in the build, or in the image (CI asserts all three). `mcp` is the 2.x
 line: the app object is `MCPServer` (the v2 rename of `FastMCP`), and the
@@ -49,9 +49,9 @@ host (it lives outside this repo). Rollback: `git checkout <older-sha> && ./depl
   that unit, or running the image bare, means `deploy.sh` never sees
   "healthy" and times out.
 - `.containerignore` excludes `tests/`, `scripts/`, `*.md` and `.git`, so
-  only `server.py` + `readability.py` + `healthcheck.py` land in the image —
-  a new top-level module must be added to the `Containerfile`'s `COPY` lines
-  and to pyright's `include`, or it won't ship or typecheck.
+  only `server.py` + `readability.py` + `wayback.py` + `healthcheck.py` land
+  in the image — a new top-level module must be added to the `Containerfile`'s
+  `COPY` lines and to pyright's `include`, or it won't ship or typecheck.
 - The deployed server is wired into `~/.config/opencode/opencode.json` as a
   remote MCP entry (currently `http://192.168.1.112:8000/mcp` with a bearer
   token). `/health` is open and answers exactly `{"status":"ok"}`; any other
@@ -70,9 +70,9 @@ host (it lives outside this repo). Rollback: `git checkout <older-sha> && ./depl
 - Two tools bypass `_http_client` and need different treatment:
   `search_web` builds its own client (tests drive it with the `searxng`
   stub fixture, which also records the outgoing query params) and
-  `fetch_wayback` builds its own too (tests monkeypatch the three
-  `_wayback_from_*` probes; the `dead_wayback_tiers` fixture makes them all
-  report "no snapshot").
+  `fetch_wayback` builds its own too. Its tier probes live in `wayback.py`,
+  so tests monkeypatch `wayback._wayback_from_*` (the `dead_wayback_tiers`
+  fixture makes them all report "no snapshot"), not `server`.
 - `search_web` results are cached process-globally, so an autouse fixture
   in `conftest.py` clears the cache around every test — tests repoint
   `SEARXNG_URL` and mutate the stub payload, and a stale entry would leak

@@ -26,6 +26,7 @@ import pytest
 from mcp import Client
 
 import server
+import wayback
 from server import mcp
 
 # A tool handler: given the request, decide what the wire answers.
@@ -208,4 +209,4 @@ def dead_wayback_tiers(monkeypatch: pytest.MonkeyPatch) -> None:
     from tests.fakes import make_probe
 
     for name in WAYBACK_PROBES:
-        monkeypatch.setattr(server, name, make_probe(name, None))
+        monkeypatch.setattr(wayback, name, make_probe(name, None))

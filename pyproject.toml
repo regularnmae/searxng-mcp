@@ -57,7 +57,7 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 # server.py is the app; healthcheck.py runs in the container, and the
 # tests and scripts are typechecked with it, so a fixture regression is
 # a CI failure rather than a surprise later.
-include = ["server.py", "readability.py", "healthcheck.py", "tests", "scripts"]
+include = ["server.py", "readability.py", "wayback.py", "healthcheck.py", "tests", "scripts"]
 # The floor from requires-python, not the image's 3.14: code has to
 # typecheck on the oldest Python the manifest allows.
 pythonVersion = "3.12"

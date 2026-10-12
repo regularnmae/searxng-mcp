@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-import server
+import wayback
 from tests.fakes import FakeClient, FakeResponse
 
 # The parsers below are pure string handling, so they are tested directly
@@ -31,7 +31,7 @@ from tests.fakes import FakeClient, FakeResponse
     ],
 )
 def test_format_cdx_timestamp(raw: str, expected: str) -> None:
-    assert server._format_cdx_timestamp(raw) == expected
+    assert wayback._format_cdx_timestamp(raw) == expected
 
 
 @pytest.mark.parametrize(
@@ -44,7 +44,7 @@ def test_format_cdx_timestamp(raw: str, expected: str) -> None:
     ],
 )
 def test_clean_original(raw: str, expected: str) -> None:
-    assert server._clean_original(raw) == expected
+    assert wayback._clean_original(raw) == expected
 
 
 def test_short_reason_reads_like_a_human_wrote_it() -> None:
@@ -52,21 +52,21 @@ def test_short_reason_reads_like_a_human_wrote_it() -> None:
         pass
 
     Timeout.__name__ = "ReadTimeout"
-    assert server._short_reason(Timeout("x")) == "timed out"
+    assert wayback._short_reason(Timeout("x")) == "timed out"
 
     class ConnectError(Exception):
         pass
 
     ConnectError.__name__ = "ConnectError"
-    assert server._short_reason(ConnectError("x")) == "connection failed"
+    assert wayback._short_reason(ConnectError("x")) == "connection failed"
 
-    assert server._short_reason(RuntimeError("archive.ph rate-limited")) == (
+    assert wayback._short_reason(RuntimeError("archive.ph rate-limited")) == (
         "archive.ph rate-limited"
     )
 
 
 def test_wayback_hit_explains_the_live_marker() -> None:
-    text = server._format_wayback_hit(
+    text = wayback._format_wayback_hit(
         "archive.today", "https://archive.ph/20300101000000/https://x/", "20300101000000", "https://x/"
     )
     assert "live snapshot" in text
@@ -74,7 +74,7 @@ def test_wayback_hit_explains_the_live_marker() -> None:
 
 
 def test_wayback_hit_renders_a_dated_snapshot() -> None:
-    text = server._format_wayback_hit(
+    text = wayback._format_wayback_hit(
         "Internet Archive",
         "https://web.archive.org/web/20020120142510/http://x/",
         "20020120142510",
@@ -98,29 +98,29 @@ def test_wayback_available_hit() -> None:
             }
         )
     )
-    hit = server._wayback_from_available(client, "http://example.com/")
+    hit = wayback._wayback_from_available(client, "http://example.com/")
     assert hit is not None
     ts, original, snapshot = hit
     assert ts == "20020120142510"
     assert original == "http://example.com/"
     assert snapshot == "https://web.archive.org/web/20020120142510/http://example.com/"
-    assert client.calls[0]["url"] == server.WAYBACK_AVAILABLE_URL
+    assert client.calls[0]["url"] == wayback.WAYBACK_AVAILABLE_URL
 
 
 def test_wayback_available_no_snapshot() -> None:
     client = FakeClient(FakeResponse(json_data={"archived_snapshots": {}}))
-    assert server._wayback_from_available(client, "http://example.com/") is None
+    assert wayback._wayback_from_available(client, "http://example.com/") is None
 
 
 def test_wayback_available_outage_page_looks_like_no_snapshot() -> None:
     """During the 2026-10 IA incident this API answered with HTML."""
     client = FakeClient(FakeResponse(text="<html>503 Service Unavailable</html>"))
-    assert server._wayback_from_available(client, "http://example.com/") is None
+    assert wayback._wayback_from_available(client, "http://example.com/") is None
 
 
 def test_wayback_available_garbage_json() -> None:
     client = FakeClient(FakeResponse(json_data={"archived_snapshots": {"closest": {}}}))
-    assert server._wayback_from_available(client, "http://example.com/") is None
+    assert wayback._wayback_from_available(client, "http://example.com/") is None
 
 
 # --- tier 2: the timemap ---------------------------------------------
@@ -135,12 +135,12 @@ TIMEMAP = """\
 
 def test_wayback_timemap_prefers_the_newest() -> None:
     client = FakeClient(FakeResponse(text=TIMEMAP))
-    hit = server._wayback_from_timemap(client, "http://example.com/")
+    hit = wayback._wayback_from_timemap(client, "http://example.com/")
     assert hit is not None
     ts, original, snapshot = hit
     assert ts == "20261010010203"
     assert original == "http://example.com/"
-    assert client.calls[0]["url"] == server.WAYBACK_TIMEMAP_URL + "http://example.com/"
+    assert client.calls[0]["url"] == wayback.WAYBACK_TIMEMAP_URL + "http://example.com/"
 
 
 def test_wayback_timemap_first_only() -> None:
@@ -148,13 +148,13 @@ def test_wayback_timemap_first_only() -> None:
         '<https://web.archive.org/web/19980126065830/http://example.com/>;'
         ' rel="first memento"; datetime="Mon, 26 Jan 1998 06:58:30 GMT"\n'
     )
-    hit = server._wayback_from_timemap(FakeClient(FakeResponse(text=text)), "http://example.com/")
+    hit = wayback._wayback_from_timemap(FakeClient(FakeResponse(text=text)), "http://example.com/")
     assert hit is not None
     assert hit[0] == "19980126065830"
 
 
 def test_wayback_timemap_no_mementos() -> None:
-    assert server._wayback_from_timemap(FakeClient(FakeResponse(text="")), "http://x/") is None
+    assert wayback._wayback_from_timemap(FakeClient(FakeResponse(text="")), "http://x/") is None
 
 
 # --- tier 3: archive.today -------------------------------------------
@@ -164,7 +164,7 @@ def test_wayback_archive_ph_hit() -> None:
     client = FakeClient(
         FakeResponse(status_code=302, headers={"location": "https://archive.ph/20260101000000/http://example.com/"})
     )
-    hit = server._wayback_from_archive_ph(client, "http://example.com/")
+    hit = wayback._wayback_from_archive_ph(client, "http://example.com/")
     assert hit is not None
     ts, original, snapshot = hit
     assert ts == "20260101000000"
@@ -176,18 +176,18 @@ def test_wayback_archive_ph_accepts_every_mirror(host: str) -> None:
     client = FakeClient(
         FakeResponse(status_code=302, headers={"location": f"https://{host}/20260101000000/http://example.com/"})
     )
-    hit = server._wayback_from_archive_ph(client, "http://example.com/")
+    hit = wayback._wayback_from_archive_ph(client, "http://example.com/")
     assert hit is not None and hit[0] == "20260101000000"
 
 
 def test_wayback_archive_ph_no_snapshot() -> None:
     client = FakeClient(FakeResponse(status_code=404))
-    assert server._wayback_from_archive_ph(client, "http://example.com/") is None
+    assert wayback._wayback_from_archive_ph(client, "http://example.com/") is None
 
 
 def test_wayback_archive_ph_rate_limit_raises() -> None:
     client = FakeClient(FakeResponse(status_code=429))
     with pytest.raises(RuntimeError, match="rate-limited"):
-        server._wayback_from_archive_ph(client, "http://example.com/")
+        wayback._wayback_from_archive_ph(client, "http://example.com/")
 
 

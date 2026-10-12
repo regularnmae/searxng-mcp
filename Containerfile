@@ -30,6 +30,7 @@ RUN uv pip install --system --require-hashes -r requirements.txt \
 
 COPY server.py .
 COPY readability.py .
+COPY wayback.py .
 COPY healthcheck.py .
 
 USER nobody

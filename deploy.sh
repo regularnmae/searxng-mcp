@@ -17,7 +17,7 @@ HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-180}"
 cd "$(dirname "$0")"
 
 # Fail fast on syntax errors instead of deploying a broken image.
-python3 -m py_compile server.py readability.py
+python3 -m py_compile server.py readability.py wayback.py
 
 # Show what's being deployed; warn if the tree has uncommitted work.
 if git rev-parse --git-dir >/dev/null 2>&1; then

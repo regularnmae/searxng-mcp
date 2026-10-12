@@ -14,7 +14,7 @@ from collections.abc import Iterator
 
 import pytest
 
-import server
+import wayback
 from tests.fakes import Hit, make_probe, make_raising_probe
 
 AVAILABLE_HIT: Hit = (
@@ -36,9 +36,9 @@ PH_HIT: Hit = (
 
 @pytest.fixture(autouse=True)
 def _clear_cooldowns() -> Iterator[None]:
-    server._wayback_tier_cooldowns.clear()
+    wayback._wayback_tier_cooldowns.clear()
     yield
-    server._wayback_tier_cooldowns.clear()
+    wayback._wayback_tier_cooldowns.clear()
 
 
 @pytest.fixture(autouse=True)
@@ -48,7 +48,7 @@ def _dead_tiers(dead_wayback_tiers) -> None:
 
 
 def _override(monkeypatch: pytest.MonkeyPatch, name: str, probe) -> None:
-    monkeypatch.setattr(server, name, probe)
+    monkeypatch.setattr(wayback, name, probe)
 
 
 @pytest.mark.anyio
@@ -60,7 +60,7 @@ async def test_uses_the_first_tier_that_answers(call, monkeypatch) -> None:
         fallen_through.append("timemap")
         return None
 
-    monkeypatch.setattr(server, "_wayback_from_timemap", timemap)
+    monkeypatch.setattr(wayback, "_wayback_from_timemap", timemap)
 
     text = await call("fetch_wayback", url="http://example.com/")
     assert "**Source:** Internet Archive" in text
@@ -125,20 +125,20 @@ async def test_failing_tier_is_put_in_cooldown(call, monkeypatch) -> None:
     _override(monkeypatch, "_wayback_from_archive_ph", make_probe("ph", PH_HIT))
 
     await call("fetch_wayback", url="http://example.com/")
-    assert "Internet Archive" in server._wayback_tier_cooldowns
-    assert server._wayback_tier_cooldowns["Internet Archive"] > time.monotonic()
+    assert "Internet Archive" in wayback._wayback_tier_cooldowns
+    assert wayback._wayback_tier_cooldowns["Internet Archive"] > time.monotonic()
 
 
 @pytest.mark.anyio
 async def test_success_does_not_cool_a_tier_down(call, monkeypatch) -> None:
     _override(monkeypatch, "_wayback_from_available", make_probe("available", None))
     await call("fetch_wayback", url="http://example.com/")
-    assert "Internet Archive" not in server._wayback_tier_cooldowns
+    assert "Internet Archive" not in wayback._wayback_tier_cooldowns
 
 
 @pytest.mark.anyio
 async def test_cooled_down_tier_is_skipped_not_retried(call, monkeypatch) -> None:
-    server._wayback_tier_cooldowns["Internet Archive"] = time.monotonic() + 300
+    wayback._wayback_tier_cooldowns["Internet Archive"] = time.monotonic() + 300
 
     text = await call("fetch_wayback", url="http://example.com/")
     assert "recently unavailable, skipped" in text
@@ -147,7 +147,7 @@ async def test_cooled_down_tier_is_skipped_not_retried(call, monkeypatch) -> Non
 
 @pytest.mark.anyio
 async def test_cooldown_expires(call, monkeypatch) -> None:
-    server._wayback_tier_cooldowns["Internet Archive"] = time.monotonic() - 1
+    wayback._wayback_tier_cooldowns["Internet Archive"] = time.monotonic() - 1
 
     text = await call("fetch_wayback", url="http://example.com/")
     assert "skipped" not in text
