@@ -27,6 +27,10 @@ dev = [
     "anyio>=4.5",
     "pytest>=8.3",
     "ruff>=0.6",
+    # The nodejs extra bundles Node, so `uv run pyright` works on a
+    # machine with no node on PATH; plain pyright would download one at
+    # runtime and fail on hosts without libatomic.
+    "pyright[nodejs]>=1.1.414",
 ]
 
 # server.py is a script at the repo root, not a package: without this uv
@@ -48,3 +52,12 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.pyright]
+# server.py is the app; healthcheck.py runs in the container, and the
+# tests and scripts are typechecked with it, so a fixture regression is
+# a CI failure rather than a surprise later.
+include = ["server.py", "healthcheck.py", "tests", "scripts"]
+# The floor from requires-python, not the image's 3.14: code has to
+# typecheck on the oldest Python the manifest allows.
+pythonVersion = "3.12"

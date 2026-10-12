@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any
 
 import pytest
 
@@ -142,11 +143,11 @@ async def test_reports_http_failure(call, monkeypatch) -> None:
             self.end_headers()
             self.wfile.write(body)
 
-        def log_message(self, *_args) -> None:
+        def log_message(self, format: str, *args: Any) -> None:
             return
 
     with ThreadingHTTPServer(("127.0.0.1", 0), Denying) as httpd:
-        host, port = httpd.server_address
+        host, port = httpd.server_address[:2]
         threading.Thread(
             target=httpd.serve_forever,
             kwargs={"poll_interval": 0.01},
@@ -162,7 +163,7 @@ async def test_reports_http_failure(call, monkeypatch) -> None:
 async def test_reports_connection_failure(call, monkeypatch) -> None:
     """Nothing listening on the port: the tool must say so, not hang."""
     with ThreadingHTTPServer(("127.0.0.1", 0), BaseHTTPRequestHandler) as httpd:
-        host, port = httpd.server_address
+        host, port = httpd.server_address[:2]
     monkeypatch.setattr(server, "SEARXNG_URL", f"http://{host}:{port}/search")
     text = await call("search_web", query="test query")
     assert "HTTP error" in text

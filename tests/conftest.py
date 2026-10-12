@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import threading
 import urllib.parse
-from collections.abc import Callable, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
@@ -62,7 +62,7 @@ def anyio_backend() -> str:
 
 
 @pytest.fixture
-async def client() -> Iterator[Client]:
+async def client() -> AsyncIterator[Client]:
     """An in-memory client connected to the real server object."""
     async with Client(mcp, raise_exceptions=True) as c:
         yield c
@@ -125,14 +125,14 @@ class _Stub:
                 self.end_headers()
                 self.wfile.write(body)
 
-            def log_message(self, *_args) -> None:  # silence the access log
+            def log_message(self, format: str, *args: Any) -> None:  # silence the access log
                 return
 
         self._httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
 
     @property
     def search_url(self) -> str:
-        host, port = self._httpd.server_address
+        host, port = self._httpd.server_address[:2]
         return f"http://{host}:{port}/search"
 
     @property

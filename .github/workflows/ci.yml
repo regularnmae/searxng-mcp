@@ -15,6 +15,17 @@ jobs:
           enable-cache: true
       - run: uv run --frozen ruff check .
 
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      # Config lives in [tool.pyright]: standard mode over server.py,
+      # healthcheck.py, tests and scripts.
+      - run: uv run --frozen pyright
+
   test:
     runs-on: ubuntu-latest
     strategy:

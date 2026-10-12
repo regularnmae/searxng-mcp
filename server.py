@@ -6,7 +6,7 @@ import re
 import socket
 import time
 from datetime import UTC, datetime
-from typing import Annotated, Literal
+from typing import Annotated, Literal, get_args
 from urllib.parse import urljoin, urlparse
 from zoneinfo import ZoneInfo
 
@@ -20,6 +20,19 @@ from mcp.types import ToolAnnotations
 from pydantic import Field
 
 logger = logging.getLogger("searxng-mcp")
+
+# The SDK types log_level as a closed set, so an unrecognised LOG_LEVEL
+# has to be resolved to one of its levels here -- the raw env string is
+# not assignable, and an unknown level falling back to INFO beats the
+# import-time raise that the SDK would otherwise produce.
+_LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+_LEVELS: tuple[_LogLevel, ...] = get_args(_LogLevel)
+
+
+def _log_level() -> _LogLevel:
+    requested = os.environ.get("LOG_LEVEL", "INFO").upper()
+    return requested if requested in _LEVELS else "INFO"
+
 
 # Initialize MCPServer (v2 API; FastMCP was renamed in mcp 2.x).
 # `instructions` is the one place to tell the model how these tools
@@ -36,7 +49,7 @@ mcp = MCPServer(
         "gone. Chain search_web -> webfetch for anything factual, and "
         "prefer fetch_pdf over webfetch for a PDF URL."
     ),
-    log_level=os.environ.get("LOG_LEVEL", "INFO").upper(),
+    log_level=_log_level(),
 )
 
 # Every tool here only reads. Saying so lets a well-behaved client skip
