@@ -43,6 +43,56 @@ RSS = b"""<?xml version="1.0" encoding="utf-8"?>
 </item>
 </channel></rss>"""
 
+# An article surrounded by chrome a <div>-only page would otherwise leak.
+ARTICLE_PAGE = """<!doctype html>
+<html><head><title>Widget Docs</title></head>
+<body>
+  <header><a href="/">Site home</a></header>
+  <div class="sidebar"><p>Sidebar promo: buy widgets now, limited offer!</p></div>
+  <div id="cookie-banner"><p>We use cookies to improve your experience.</p></div>
+  <article>
+    <header><h1>Widgets</h1><p class="byline">By Ada</p></header>
+    <p>A widget is a thing that does widget things, described here at a
+       length long enough to clear the minimum content size the extractor
+       needs before it trusts a semantic article element over the body.</p>
+    <p>A second paragraph with more detail about widgets, how they are
+       assembled and where they are used, so the article plainly has more
+       text than the sidebar and the cookie banner put together.</p>
+  </article>
+  <footer>(c) 2026</footer>
+</body></html>"""
+
+META_PAGE = """<!doctype html>
+<html><head>
+<title>Fallback Title</title>
+<meta property="og:title" content="OG Title">
+<meta property="og:description" content="An OG description.">
+<meta property="og:site_name" content="Example">
+<meta property="og:type" content="article">
+<meta property="og:image" content="https://example.com/og.png">
+<meta name="author" content="Ada Lovelace">
+<meta property="article:published_time" content="2026-10-01T12:00:00Z">
+<link rel="canonical" href="https://example.com/canonical">
+</head>
+<body><article><p>Body text long enough to be selected as the main content
+of this page, comfortably over the threshold.</p></article></body></html>"""
+
+JSONLD_PAGE = """<!doctype html>
+<html><head><title>Doc</title>
+<script type="application/ld+json">
+{"@context":"https://schema.org","@graph":[
+ {"@type":"WebSite","name":"Site"},
+ {"@type":"Article","headline":"Graph headline",
+  "author":[{"@type":"Person","name":"Grace Hopper"}],
+  "datePublished":"2026-09-01",
+  "image":{"url":"https://example.com/a.png"},
+  "description":"From JSON-LD."}]}
+</script>
+<script type="application/ld+json">{ this is not valid json</script>
+</head>
+<body><article><p>Some article body that is comfortably longer than the
+minimum size threshold for selection as the main content.</p></article></body></html>"""
+
 
 def _html(body: str, status: int = 200) -> httpx2.Response:
     return httpx2.Response(status, text=body, headers={"content-type": "text/html"})
@@ -151,6 +201,54 @@ async def test_webfetch_structured_error_for_binary(client, mock_http) -> None:
     assert structured["error"] is not None
     assert structured["content"] == ""
     assert structured["content_type"] == "image/png"
+
+
+@pytest.mark.anyio
+async def test_webfetch_prefers_the_article_over_chrome(call, mock_http) -> None:
+    mock_http(lambda request: _html(ARTICLE_PAGE))
+    text = await call("webfetch", url="http://93.184.216.34/docs")
+    assert "A widget is a thing" in text
+    assert "By Ada" in text  # the article's own <header> is kept
+    for absent in ("Sidebar promo", "We use cookies", "Site home", "(c) 2026"):
+        assert absent not in text, f"chrome leaked into the extraction: {absent}"
+
+
+@pytest.mark.anyio
+async def test_webfetch_extracts_open_graph_metadata(client, mock_http) -> None:
+    mock_http(lambda request: _html(META_PAGE))
+    result = await client.call_tool("webfetch", {"url": "http://93.184.216.34/post"})
+    assert result.structured_content["metadata"] == {
+        "description": "An OG description.",
+        "site_name": "Example",
+        "author": "Ada Lovelace",
+        "published": "2026-10-01T12:00:00Z",
+        "image": "https://example.com/og.png",
+        "canonical_url": "https://example.com/canonical",
+        "type": "article",
+    }
+    # og:title wins over the <title> tag.
+    assert result.structured_content["title"] == "OG Title"
+
+
+@pytest.mark.anyio
+async def test_webfetch_falls_back_to_json_ld(client, mock_http) -> None:
+    """No OG tags: metadata comes from the @graph block, and the malformed
+    JSON-LD block beside it is ignored rather than fatal."""
+    mock_http(lambda request: _html(JSONLD_PAGE))
+    result = await client.call_tool("webfetch", {"url": "http://93.184.216.34/g"})
+    metadata = result.structured_content["metadata"]
+    assert metadata["description"] == "From JSON-LD."
+    assert metadata["author"] == "Grace Hopper"
+    assert metadata["published"] == "2026-09-01"
+    assert metadata["image"] == "https://example.com/a.png"
+    assert metadata["site_name"] is None
+
+
+@pytest.mark.anyio
+async def test_webfetch_non_html_has_no_metadata(client, mock_http) -> None:
+    mock_http(lambda request: _bytes(b'{"ok": true}', "application/json"))
+    result = await client.call_tool("webfetch", {"url": "http://93.184.216.34/api"})
+    assert result.structured_content["metadata"] is None
 
 
 # --- fetch_pdf ------------------------------------------------------

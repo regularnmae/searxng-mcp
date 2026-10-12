@@ -12,7 +12,7 @@ from the code.
 ```sh
 uv run ruff check .            # lint (CI gate). No `ruff format` step; line-length 100, rules E,F,I,UP,B,SIM
 uv run pyright                 # typecheck (CI gate); config in [tool.pyright], standard mode, floor Python 3.12
-uv run pytest -q              # 182 tests, ~2s, no network
+uv run pytest -q              # 186 tests, ~2s, no network
 uv run pytest tests/test_guard.py -q          # focused
 uv run python scripts/smoke.py               # boots the real app on a free loopback port: /health, 401s, handshake
 uv run --python 3.14 pytest -q                # against the image's Python (base is 3.14-alpine; >=3.12, CI matrix 3.12+3.14)
@@ -86,6 +86,10 @@ host (it lives outside this repo). Rollback: `git checkout <older-sha> && ./depl
   publish an output schema. Returning a `CallToolResult` (rather than a
   bare model) is what keeps the text block as markdown instead of the
   SDK serialising the whole model as pretty-printed JSON into it.
+- `webfetch` reduces HTML with a hand-rolled readability pass
+  (`_parse_html`: metadata first, then `_strip_boilerplate`, then
+  `_main_node`) rather than a library. Keep it dependency-free; the tests
+  pin article-vs-chrome selection and OG/Twitter/JSON-LD metadata.
 - Numeric args are bounded with `Annotated[int, Field(ge=…, le=…)]`, not
   validated in the body; closed sets use `Literal`. The docstring's `Args:`
   section is the model-visible contract, so it must describe the bounds.

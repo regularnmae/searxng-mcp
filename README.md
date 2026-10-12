@@ -10,7 +10,7 @@ Seven tools:
 | Tool | What it does |
 | --- | --- |
 | `search_web` | Search SearXNG; returns titles, URLs, the engines that found each hit, publication date and snippets. Near-duplicate URLs are merged (http/https, `www.`, trailing slash, fragment, tracking params) and every source engine is kept |
-| `webfetch` | Read a page as markdown; HTML is reduced, JSON and text pass through |
+| `webfetch` | Read a page as markdown. Boilerplate (nav, sidebars, cookie banners) is stripped and the main content extracted; Open Graph / Twitter / JSON-LD metadata is returned in the structured content |
 | `fetch_pdf` | Extract text from a PDF, page by page (an arxiv paper, say) |
 | `fetch_rss` | List recent items from an RSS or Atom feed |
 | `fetch_wayback` | Find the closest archived copy of a URL across three sources |
