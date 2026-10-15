@@ -26,7 +26,7 @@ uv add <pkg>                   # edits pyproject.toml AND re-locks — always co
 uv export --format requirements-txt --no-dev --no-emit-project --locked -o /tmp/r.txt   # what the image installs
 uv lock --check                # CI drift gate: fails if pyproject.toml changed without re-locking
 uvx pip-audit@2.10.1 --requirement requirements-audit.txt           # audit job (version is pinned deliberately)
-podman build -t localhost/searxng-mcp:latest .  # build from repo root; Containerfile is multi-stage
+podman build -t localhost/searxng-mcp:latest .  # build from repo root; single-stage Containerfile
 ```
 
 Deployment is owned by the `stack` repo: `cd ~/build/stack && ./deploy.sh --only searxng-mcp`
@@ -39,14 +39,15 @@ not here — this repo ships only code, tests, CI and `Containerfile`.
 - Nothing runs the server without `SEARXNG_MCP_TOKEN`: startup raises
   `RuntimeError` unless `MCP_ALLOW_ANONYMOUS=1`. `scripts/smoke.py` sets
   its own token; ad-hoc runs must set one.
-- The Containerfile's uv stage derives from `ghcr.io/astral-sh/uv` pinned
-  **by digest** — in that derived image uv lives at `/usr/local/bin/uv`,
-  not `/uv` (`/uv` is the distroless base image; copying it from a derived
-  tag fails the build).
-- The install layer order matters: `uv pip install --system` (no venv
-  exists in the runtime stage) → `uv cache clean` → remove the binary →
-  `python -m pip uninstall -y pip`. All in one `RUN`, because the image
-  must end with neither uv nor pip.
+- The Containerfile copies the `uv` binary straight out of
+  `ghcr.io/astral-sh/uv` pinned **by tag and digest**. In that image uv
+  lives at `/usr/local/bin/uv`, not `/uv` (`/uv` is the distroless base
+  image; copying it from a derived tag fails the build).
+- The install is one `RUN`: `uv pip install --system --no-cache
+  --require-hashes` (no venv exists), then delete the uv binary, the
+  requirements file and the lockfiles, then `python -m pip uninstall -y pip`.
+  All in one layer, because the image must end with neither uv nor pip and
+  no build inputs.
 - The image itself declares no `HEALTHCHECK`; the deployed unit supplies
   `HealthCmd=python /app/healthcheck.py` plus `SEARXNG_MCP_TOKEN`. Removing
   that unit, or running the image bare, means `stack/deploy.sh` never sees
