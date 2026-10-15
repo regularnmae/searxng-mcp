@@ -30,10 +30,18 @@ WAYBACK_TIMEMAP_URL = "https://web.archive.org/web/timemap/link/"
 # also answer on .today/.is/.li; any host in the target is accepted.
 ARCHIVE_PH_NEWEST = "https://archive.ph/newest/"
 
-# Per-source timeouts, kept short so a dead tier costs little.
-WAYBACK_AVAILABLE_TIMEOUT = 8.0
-WAYBACK_TIMEMAP_TIMEOUT = 12.0
-WAYBACK_PH_TIMEOUT = 8.0
+# Per-source ceilings, kept short so a dead tier costs little. They are
+# ceilings, not budgets: each tier is actually given whatever is left of
+# WAYBACK_TOTAL_TIMEOUT, capped by its own value.
+WAYBACK_AVAILABLE_TIMEOUT = 4.0
+WAYBACK_TIMEMAP_TIMEOUT = 6.0
+WAYBACK_PH_TIMEOUT = 4.0
+
+# Wall-clock budget for the whole lookup. The three tiers are tried in
+# sequence, so without a shared deadline their ceilings would stack (they
+# used to add up to ~28s on a bad archive day). Each tier gets the time
+# remaining, and once the budget is gone the rest are skipped, not started.
+WAYBACK_TOTAL_TIMEOUT = 10.0
 
 # A source that just failed transport-level is skipped for this long,
 # so repeated calls during a sustained outage don't pay each dead
@@ -66,17 +74,22 @@ def _clean_original(url: str) -> str:
     return re.sub(r"^(https?)://([^/?#]+):(?:80|443)(/|$)", r"\1://\2\3", url)
 
 
-def _wayback_from_available(client, url: str) -> tuple[str, str, str] | None:
+def _wayback_from_available(
+    client, url: str, timeout: float
+) -> tuple[str, str, str] | None:
     """IA availability API -> (timestamp, original, snapshot_url).
 
     Returns None when the API answers but has no snapshot (it did
     exactly that during the Oct 2026 window); raises on transport
     trouble so the caller can fall through to the next source.
+
+    `timeout` is this tier's slice of the shared budget, chosen by
+    `find_snapshot`.
     """
     response = client.get(
         WAYBACK_AVAILABLE_URL,
         params={"url": url},
-        timeout=WAYBACK_AVAILABLE_TIMEOUT,
+        timeout=timeout,
     )
     response.raise_for_status()
     if response.text.lstrip().startswith("<"):
@@ -95,16 +108,16 @@ def _wayback_from_available(client, url: str) -> tuple[str, str, str] | None:
     return ts, original, f"https://web.archive.org/web/{ts}/{original}"
 
 
-def _wayback_from_timemap(client, url: str) -> tuple[str, str, str] | None:
+def _wayback_from_timemap(
+    client, url: str, timeout: float
+) -> tuple[str, str, str] | None:
     """IA timemap (Memento) -> newest capture it lists.
 
     The timemap is a replay-side backend, independent of the
     (CDX-indexed) availability API; during the Oct 2026 IA incident
     it stayed up while CDX hung.
     """
-    response = client.get(
-        WAYBACK_TIMEMAP_URL + url, timeout=WAYBACK_TIMEMAP_TIMEOUT
-    )
+    response = client.get(WAYBACK_TIMEMAP_URL + url, timeout=timeout)
     response.raise_for_status()
     # Link format lines, e.g.:
     # <https://web.archive.org/web/20020120142510/http://x:80/>;
@@ -125,7 +138,9 @@ def _wayback_from_timemap(client, url: str) -> tuple[str, str, str] | None:
     return ts, original, f"https://web.archive.org/web/{ts}/{original}"
 
 
-def _wayback_from_archive_ph(client, url: str) -> tuple[str, str, str] | None:
+def _wayback_from_archive_ph(
+    client, url: str, timeout: float
+) -> tuple[str, str, str] | None:
     """Newest archive.today snapshot (timestamp, original, snapshot_url).
 
     Queries the /newest/ redirect, which 302s to the snapshot ID.
@@ -135,7 +150,7 @@ def _wayback_from_archive_ph(client, url: str) -> tuple[str, str, str] | None:
     response = client.get(
         ARCHIVE_PH_NEWEST + url,
         follow_redirects=False,
-        timeout=WAYBACK_PH_TIMEOUT,
+        timeout=timeout,
     )
     if response.status_code == 429:
         raise RuntimeError("archive.ph rate-limited this host")
@@ -187,8 +202,11 @@ def find_snapshot(client, url: str) -> str:
 
     The tiers are tried in order: the IA availability API, the IA timemap
     (a separate IA backend that flaps independently of the API), then the
-    archive.today mirrors as an IA-independent fallback. A tier that just
-    failed transport-level is skipped for `WAYBACK_TIER_COOLDOWN` so a
+    archive.today mirrors as an IA-independent fallback. The whole lookup
+    shares `WAYBACK_TOTAL_TIMEOUT`: each tier is handed the time remaining
+    (capped by its own ceiling), and once the budget is spent the remaining
+    tiers are skipped rather than started. A tier that just failed
+    transport-level is additionally skipped for `WAYBACK_TIER_COOLDOWN` so a
     sustained outage does not re-pay each dead tier's timeout.
 
     `client` is supplied by the caller -- the lookups hit the archives,
@@ -197,18 +215,23 @@ def find_snapshot(client, url: str) -> str:
     every source tried when none had a snapshot.
     """
     tiers = (
-        ("Internet Archive", _wayback_from_available),
-        ("Internet Archive timemap", _wayback_from_timemap),
-        ("archive.today", _wayback_from_archive_ph),
+        ("Internet Archive", _wayback_from_available, WAYBACK_AVAILABLE_TIMEOUT),
+        ("Internet Archive timemap", _wayback_from_timemap, WAYBACK_TIMEMAP_TIMEOUT),
+        ("archive.today", _wayback_from_archive_ph, WAYBACK_PH_TIMEOUT),
     )
 
+    deadline = time.monotonic() + WAYBACK_TOTAL_TIMEOUT
     notes = []
-    for name, probe in tiers:
+    for name, probe, ceiling in tiers:
         if time.monotonic() < _wayback_tier_cooldowns.get(name, 0.0):
             notes.append(f"{name}: recently unavailable, skipped")
             continue
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            notes.append(f"{name}: skipped (overall time budget exhausted)")
+            continue
         try:
-            hit = probe(client, url)
+            hit = probe(client, url, min(ceiling, remaining))
         except Exception as err:
             _wayback_tier_cooldowns[name] = time.monotonic() + WAYBACK_TIER_COOLDOWN
             notes.append(f"{name}: {_short_reason(err)}")

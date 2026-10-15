@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-# A probe: (client, url) -> hit tuple or None.
-Probe = Callable[[object, str], object]
+# A probe: (client, url, timeout) -> hit tuple or None.
+Probe = Callable[[object, str, float], object]
 Hit = tuple[str, str, str]
 
 
@@ -45,7 +45,7 @@ class FakeClient:
 
 
 def make_probe(name: str, value: Hit | None) -> Probe:
-    def _probe(client, url) -> Hit | None:
+    def _probe(client, url, timeout) -> Hit | None:
         return value
 
     _probe.__name__ = f"probe_{name}"
@@ -53,7 +53,7 @@ def make_probe(name: str, value: Hit | None) -> Probe:
 
 
 def make_raising_probe(name: str, error: Exception) -> Probe:
-    def _probe(client, url) -> Hit | None:
+    def _probe(client, url, timeout) -> Hit | None:
         raise error
 
     _probe.__name__ = f"probe_{name}"

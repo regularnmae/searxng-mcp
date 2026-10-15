@@ -21,7 +21,7 @@ from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from pydantic import BaseModel, Field
 
 from readability import PageMetadata, _is_binary_content, _parse_html
-from wayback import find_snapshot
+from wayback import WAYBACK_TOTAL_TIMEOUT, find_snapshot
 
 logger = logging.getLogger("searxng-mcp")
 
@@ -826,8 +826,11 @@ def fetch_wayback(url: str) -> str:
 
     # The tier probes accept a client, so the one thing they share -- the
     # browser UA -- stays configured here, keeping wayback.py free of httpx.
+    # The client's timeout is only a fallback: `find_snapshot` hands each
+    # probe its slice of `WAYBACK_TOTAL_TIMEOUT`, so the whole lookup is
+    # bounded end to end rather than per tier.
     with httpx2.Client(
-        timeout=15.0,
+        timeout=WAYBACK_TOTAL_TIMEOUT,
         headers={"User-Agent": WEBFETCH_USER_AGENT},
     ) as client:
         return find_snapshot(client, url)

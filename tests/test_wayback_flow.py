@@ -56,7 +56,7 @@ async def test_uses_the_first_tier_that_answers(call, monkeypatch) -> None:
     _override(monkeypatch, "_wayback_from_available", make_probe("available", AVAILABLE_HIT))
     fallen_through: list[str] = []
 
-    def timemap(client, url) -> Hit | None:
+    def timemap(client, url, timeout) -> Hit | None:
         fallen_through.append("timemap")
         return None
 
@@ -158,6 +158,35 @@ async def test_reports_every_source_it_tried(call, monkeypatch) -> None:
     text = await call("fetch_wayback", url="http://example.com/")
     for tier in ("Internet Archive:", "Internet Archive timemap:", "archive.today:"):
         assert tier in text
+
+
+def test_overall_budget_stops_the_remaining_tiers(monkeypatch) -> None:
+    """Once WAYBACK_TOTAL_TIMEOUT is spent, later tiers are skipped, not run.
+
+    The three tiers are sequential, so before the shared deadline their
+    ceilings could stack (up to ~28s). With the budget at zero, none of
+    them should even be started.
+    """
+    monkeypatch.setattr(wayback, "WAYBACK_TOTAL_TIMEOUT", 0.0)
+    tried: list[str] = []
+
+    def probe(name: str):
+        def _probe(client, url, timeout) -> Hit | None:
+            tried.append(name)
+            return None
+
+        return _probe
+
+    for const, name in (
+        ("_wayback_from_available", "available"),
+        ("_wayback_from_timemap", "timemap"),
+        ("_wayback_from_archive_ph", "ph"),
+    ):
+        monkeypatch.setattr(wayback, const, probe(name))
+
+    text = wayback.find_snapshot(object(), "http://example.com/")
+    assert tried == [], "no tier should run once the budget is gone"
+    assert "overall time budget exhausted" in text
 
 
 @pytest.mark.anyio
