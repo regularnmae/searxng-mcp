@@ -4,8 +4,9 @@ Flat three-module Python MCP server (not a package). `server.py` is the app
 — config, tools, auth middleware; `readability.py` is its pure
 HTML-to-markdown pass and `wayback.py` its archive-lookup tiers, both
 dependency-free; `healthcheck.py` is the container healthcheck probe. Shipped as
-a rootless podman/quadlet container, with the quadlet units themselves under
-`deploy/`. Toolchain is uv only — no pip in CI,
+a rootless podman/quadlet container; the runtime — its quadlet unit, the
+`npm-network` it shares and the env wiring — is owned by the `stack` repo
+(https://github.com/regularnmae/stack), not here. Toolchain is uv only — no pip in CI,
 in the build, or in the image (CI asserts all three). `mcp` is the 2.x
 line: the app object is `MCPServer` (the v2 rename of `FastMCP`), and the
 HTTP dependency is `httpx2`, a separate distribution from `httpx` — don't
@@ -26,12 +27,12 @@ uv export --format requirements-txt --no-dev --no-emit-project --locked -o /tmp/
 uv lock --check                # CI drift gate: fails if pyproject.toml changed without re-locking
 uvx pip-audit@2.10.1 --requirement requirements-audit.txt           # audit job (version is pinned deliberately)
 podman build -t localhost/searxng-mcp:latest .  # build from repo root; Containerfile is multi-stage
-./deploy.sh                    # builds, restarts searxng-mcp.service, waits for "(healthy)" in podman ps
 ```
 
-`deploy.sh` runs `deploy/install.sh` first, so the quadlet units ship in
-this repo under `deploy/` instead of living only on the host. Rollback:
-`git checkout <older-sha> && ./deploy.sh`.
+Deployment is owned by the `stack` repo: `cd ~/build/stack && ./deploy.sh --only searxng-mcp`
+rebuilds the image, restarts `searxng-mcp.service` and waits for "(healthy)";
+`./deploy.sh` deploys the whole stack. The unit and `npm-network` live there,
+not here — this repo ships only code, tests, CI and `Containerfile`.
 
 ## Build/deploy facts that are easy to get wrong
 
@@ -48,9 +49,9 @@ this repo under `deploy/` instead of living only on the host. Rollback:
   must end with neither uv nor pip.
 - The image itself declares no `HEALTHCHECK`; the deployed unit supplies
   `HealthCmd=python /app/healthcheck.py` plus `SEARXNG_MCP_TOKEN`. Removing
-  that unit, or running the image bare, means `deploy.sh` never sees
+  that unit, or running the image bare, means `stack/deploy.sh` never sees
   "healthy" and times out.
-- `.containerignore` excludes `tests/`, `scripts/`, `deploy/`, `*.md` and
+- `.containerignore` excludes `tests/`, `scripts/`, `*.md` and
   `.git`, so only `server.py` + `readability.py` + `wayback.py` +
   `healthcheck.py` land
   in the image — a new top-level module must be added to the `Containerfile`'s
@@ -59,20 +60,21 @@ this repo under `deploy/` instead of living only on the host. Rollback:
   remote MCP entry (currently `http://192.168.1.112:8000/mcp` with a bearer
   token). `/health` is open and answers exactly `{"status":"ok"}`; any other
   JSON means you reached a different service on port 8000.
-- `deploy/` owns every quadlet unit the stack needs — `npm-network.network`,
-  `valkey.container`, `searxng.container` and `searxng-mcp.container` — plus
-  `install.sh`. install.sh symlinks them into
-  `~/.config/containers/systemd/` (quadlet follows symlinks, backing up any
-  real file to `.bak`), writes `~/.config/searxng-mcp/token.env`, and seeds
-  `~/data/searxng/` on a fresh host only. A new unit must be added to
-  `UNITS` in install.sh.
+- The runtime is owned by the `stack` repo: `stack/deploy/install.sh` symlinks
+  `npm-network.network`, `valkey.container`, `searxng.container` and
+  `searxng-mcp.container` into `~/.config/containers/systemd/` (quadlet follows
+  symlinks, backing up any real file to `.bak`), writes
+  `~/.config/searxng-mcp/token.env`, and seeds `~/data/searxng/` on a fresh
+  host only. The env-file shapes are documented in
+  `stack/deploy/examples/searxng-mcp/`.
 - The bearer token is never in the repo: the unit reads it via
-  `EnvironmentFile=%h/.config/searxng-mcp/token.env`, and install.sh reuses
-  the token the running container already has so existing clients survive
-  the switch; only `deploy/token.env.example` is committed.
-- `deploy/searxng/settings.yml` must keep `search.formats` containing `json`
-  (`search_web` gets a 403 otherwise) and carries a blank `secret_key` that
-  install.sh fills in when seeding.
+  `EnvironmentFile=%h/.config/searxng-mcp/token.env`, and
+  `stack/deploy/install.sh` reuses the token the running container already has
+  so existing clients survive the switch; only
+  `stack/deploy/examples/searxng-mcp/token.env.example` is committed.
+- `stack/deploy/searxng/settings.yml` must keep `search.formats` containing
+  `json` (`search_web` gets a 403 otherwise) and carries a blank `secret_key`
+  that `stack/deploy/install.sh` fills in when seeding.
 
 ## Testing quirks
 

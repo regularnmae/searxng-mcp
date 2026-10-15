@@ -16,9 +16,9 @@ RUN uv export --format requirements-txt --no-dev --no-emit-project --locked \
 FROM docker.io/library/python@sha256:7f2ec713f0436c59df2362d973b6a05af9e87ba78f0e94f5245c302984a7a1fd
 WORKDIR /app
 
-# The lock, not a bare dependency list: deploy.sh rebuilds from scratch
-# on every deploy, and an unpinned closure means a rebuild can silently
-# change the transitive tree. The hashes come from uv export for free,
+# The lock, not a bare dependency list: stack/deploy.sh rebuilds from
+# scratch on every deploy, and an unpinned closure means a rebuild can
+# silently change the transitive tree. The hashes come from uv export for free,
 # and --require-hashes means uv actually enforces them. Both build tools
 # leave the image after they are done with it.
 COPY --from=lockfile /usr/local/bin/uv /usr/local/bin/uv
