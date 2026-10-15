@@ -48,7 +48,7 @@ say "up" without holding the token.
 The deployed container runs as `nobody` behind a rootless quadlet. The unit
 and its env wiring are owned by the separate
 [`stack`](https://github.com/regularnmae/stack) repo, not here:
-`stack/deploy/install.sh` links the unit into
+`stack/deploy/install.sh` renders the unit into
 `~/.config/containers/systemd/`, seeds the token and (on a fresh host) the
 SearXNG settings, and reloads systemd; `stack/deploy.sh` runs that, rebuilds,
 restarts, and waits for the container's healthcheck to pass.
@@ -179,14 +179,14 @@ cd ~/build/stack
 
 `stack/deploy/install.sh` is idempotent and safe to re-run. It:
 
-- symlinks the unit into `~/.config/containers/systemd/` (quadlet follows
-  symlinks), backing up any existing real file to `.bak`;
-- writes the bearer token to `~/.config/searxng-mcp/token.env` (mode 600),
+- renders the unit into `~/.config/containers/systemd/`, backing up any existing
+  real file to `.bak`;
+- writes the bearer token to `$DATA_DIR/config/searxng-mcp/token.env` (mode 600),
   reusing the token the running container already uses so existing clients
   keep working, and only generating one when there is none. No token is ever
-  committed — the unit reads it with
-  `EnvironmentFile=%h/.config/searxng-mcp/token.env`;
-- seeds `~/data/searxng/settings.yml` and `limiter.toml` **only on a fresh
+  committed — the rendered unit reads it with
+  `EnvironmentFile=$DATA_DIR/config/searxng-mcp/token.env`;
+- seeds `$DATA_DIR/searxng/settings.yml` and `limiter.toml` **only on a fresh
   host** (an existing file is left alone). The settings enable the `json`
   format `search_web` needs and wire the Valkey limiter; a random
   `secret_key` is generated at seed time.

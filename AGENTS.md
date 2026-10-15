@@ -61,15 +61,14 @@ not here — this repo ships only code, tests, CI and `Containerfile`.
   remote MCP entry (currently `http://192.168.1.112:8000/mcp` with a bearer
   token). `/health` is open and answers exactly `{"status":"ok"}`; any other
   JSON means you reached a different service on port 8000.
-- The runtime is owned by the `stack` repo: `stack/deploy/install.sh` symlinks
+- The runtime is owned by the `stack` repo: `stack/deploy/install.sh` renders
   `npm-network.network`, `valkey.container`, `searxng.container` and
-  `searxng-mcp.container` into `~/.config/containers/systemd/` (quadlet follows
-  symlinks, backing up any real file to `.bak`), writes
-  `~/.config/searxng-mcp/token.env`, and seeds `~/data/searxng/` on a fresh
-  host only. The env-file shapes are documented in
-  `stack/deploy/examples/searxng-mcp/`.
-- The bearer token is never in the repo: the unit reads it via
-  `EnvironmentFile=%h/.config/searxng-mcp/token.env`, and
+  `searxng-mcp.container` into `~/.config/containers/systemd/` (backing up any
+  real file to `.bak`), writes `$DATA_DIR/config/searxng-mcp/token.env`, and
+  seeds `$DATA_DIR/searxng/` on a fresh host only. The env-file shapes are
+  documented in `stack/deploy/examples/searxng-mcp/`.
+- The bearer token is never in the repo: the rendered unit reads it via
+  `EnvironmentFile=$DATA_DIR/config/searxng-mcp/token.env`, and
   `stack/deploy/install.sh` reuses the token the running container already has
   so existing clients survive the switch; only
   `stack/deploy/examples/searxng-mcp/token.env.example` is committed.
