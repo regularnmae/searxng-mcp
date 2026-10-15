@@ -45,13 +45,11 @@ It listens on `0.0.0.0:8000` and serves streamable HTTP at `/mcp`. `GET /health`
 is unauthenticated and answers `{"status":"ok"}` — nothing more, so a poller can
 say "up" without holding the token.
 
-The deployed container runs as `nobody` behind a rootless quadlet. The unit
-and its env wiring are owned by the separate
-[`stack`](https://github.com/regularnmae/stack) repo, not here:
-`stack/deploy/install.sh` renders the unit into
-`~/.config/containers/systemd/`, seeds the token and (on a fresh host) the
-SearXNG settings, and reloads systemd; `stack/deploy.sh` runs that, rebuilds,
-restarts, and waits for the container's healthcheck to pass.
+The deployed container runs as `nobody` behind a rootless quadlet. Its unit and
+env wiring are owned by the separate
+[`stack`](https://github.com/regularnmae/stack) repo — that repo builds the
+image, supplies the token and (on a fresh host) the SearXNG settings, and waits
+for the healthcheck. See it for where the unit and env files live.
 
 ### Configuration
 
@@ -169,7 +167,9 @@ guard, the byte cap and the redirect check come along.
 The runtime for this server — its quadlet unit, the podman network, the Valkey
 limiter backend and the SearXNG instance — is owned by the separate
 [`stack`](https://github.com/regularnmae/stack) repo, which is the single place
-that defines how the stack runs:
+that defines how the stack runs: the unit and env-file locations, the host
+ports, and the SearXNG settings (which must keep the `json` format `search_web`
+needs and wire the Valkey limiter). This repo owns no unit and no secret.
 
 ```sh
 cd ~/build/stack
@@ -177,21 +177,6 @@ cd ~/build/stack
 ./deploy.sh                      # the whole stack
 ```
 
-`stack/deploy/install.sh` is idempotent and safe to re-run. It:
-
-- renders the unit into `~/.config/containers/systemd/`, backing up any existing
-  real file to `.bak`;
-- writes the bearer token to `$DATA_DIR/config/searxng-mcp/token.env` (mode 600),
-  reusing the token the running container already uses so existing clients
-  keep working, and only generating one when there is none. No token is ever
-  committed — the rendered unit reads it with
-  `EnvironmentFile=$DATA_DIR/config/searxng-mcp/token.env`;
-- seeds `$DATA_DIR/searxng/settings.yml` and `limiter.toml` **only on a fresh
-  host** (an existing file is left alone). The settings enable the `json`
-  format `search_web` needs and wire the Valkey limiter; a random
-  `secret_key` is generated at seed time.
-
-The env-file shapes are documented in `stack/deploy/examples/searxng-mcp/`.
 `Containerfile` pins the base image by digest and installs a hash-verified
 export of `uv.lock`, so a rebuild is the same image. Roll back the app with
 `git checkout <older-sha>` in this repo, then re-run
