@@ -10,7 +10,7 @@ WORKDIR /build
 COPY pyproject.toml uv.lock ./
 # --locked: fail rather than re-resolve, so a stale lock breaks the build
 # instead of quietly shipping different versions.
-RUN uv export --format requirements-txt --no-dev --no-emit-project --locked \
+RUN uv export --format requirements-txt --no-dev --no-emit-project --locked -q \
       -o /requirements.txt
 
 FROM docker.io/library/python@sha256:7f2ec713f0436c59df2362d973b6a05af9e87ba78f0e94f5245c302984a7a1fd
