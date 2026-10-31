@@ -975,4 +975,7 @@ if __name__ == "__main__":
         app,
         host=os.environ.get("MCP_HOST", "0.0.0.0"),
         port=int(os.environ.get("MCP_PORT", "8000")),
+        # Same floor as the SDK above: INFO would log every request
+        # (the transport's own access lines included) forever.
+        log_level=_log_level().lower(),
     )
