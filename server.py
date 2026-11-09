@@ -1,3 +1,4 @@
+import asyncio
 import hmac
 import ipaddress
 import logging
@@ -8,7 +9,7 @@ import time
 from collections import OrderedDict
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Annotated, Literal, get_args
+from typing import Annotated, Any, Literal, get_args
 from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunsplit
 from zoneinfo import ZoneInfo
 
@@ -121,6 +122,27 @@ MCP_ALLOW_ANONYMOUS = os.environ.get("MCP_ALLOW_ANONYMOUS", "") == "1"
 
 # Unauthenticated liveness path, for pollers that hold no token.
 HEALTH_PATH = "/health"
+
+# Readiness path: /health says the process is up, this says SearXNG answers.
+# Deliberately separate -- a search engine that is briefly refusing requests
+# must not fail a liveness probe and restart the container.
+READY_PATH = "/ready"
+# SearXNG's own health endpoint, at the root of the origin. SEARXNG_URL points
+# at /search, so the path is replaced rather than appended: a deployment that
+# mounts SearXNG under a subpath would need its own origin here.
+_SEARXNG_PARTS = urlparse(SEARXNG_URL)
+SEARXNG_HEALTH_URL = urlunsplit(
+    (_SEARXNG_PARTS.scheme, _SEARXNG_PARTS.netloc, "/healthz", "", "")
+)
+READY_TIMEOUT = 5.0
+# /ready is unauthenticated, so the answer is cached for a few seconds: a
+# poller hammering the path then costs one engine round trip per TTL instead of
+# one per request.
+READY_CACHE_TTL = 5.0
+_ready_cache: tuple[float, dict[str, Any], int] | None = None
+# Created lazily, inside the running loop: an asyncio.Lock binds to the loop
+# that first awaits it, and this server has exactly one in production.
+_ready_lock: asyncio.Lock | None = None
 
 # Browsers get blocked by plenty of sites; a plain UA avoids 403s.
 WEBFETCH_USER_AGENT = (
@@ -893,6 +915,53 @@ def convert_time(value: str, from_tz: str = "UTC", to_tz: str = "UTC") -> str:
     )
 
 
+async def _readiness() -> tuple[dict[str, Any], int]:
+    """`/ready`'s answer, cached for READY_CACHE_TTL seconds.
+
+    The path is unauthenticated, so without the cache any client could turn
+    one HTTP request into one engine request. The cache is a plain module
+    global: a stale-by-five-seconds "ok" is still the right answer for a
+    readiness probe. The lock means a burst of concurrent requests produces
+    one probe rather than one each.
+    """
+    global _ready_cache, _ready_lock
+    if _ready_lock is None:
+        _ready_lock = asyncio.Lock()
+    async with _ready_lock:
+        cached = _ready_cache
+        if cached is not None and time.monotonic() - cached[0] < READY_CACHE_TTL:
+            return cached[1], cached[2]
+        body, status_code = await _probe_readiness()
+        _ready_cache = (time.monotonic(), body, status_code)
+        return body, status_code
+
+
+async def _probe_readiness() -> tuple[dict[str, Any], int]:
+    """Ask SearXNG's `/healthz`, off the event loop with a short timeout.
+
+    Returns the JSON body and status code: 200 when the engine answers, 503
+    with the reason when it does not. The search path is not probed: a real
+    query would spend an engine request and could be rate-limited, which is
+    not what a readiness check should do.
+    """
+
+    def _get() -> Any:
+        with httpx2.Client(timeout=READY_TIMEOUT) as client:
+            return client.get(SEARXNG_HEALTH_URL)
+
+    try:
+        response = await asyncio.to_thread(_get)
+    except Exception as err:  # noqa: BLE001 - reported, never raised at a probe
+        logger.warning("/ready: SearXNG is not answering: %s", err)
+        return {"status": "unready", "error": str(err)}, 503
+    if response.status_code != 200:
+        return {
+            "status": "unready",
+            "error": f"SearXNG /healthz returned HTTP {response.status_code}",
+        }, 503
+    return {"status": "ready", "searxng": "ok"}, 200
+
+
 class BearerAuthMiddleware:
     """Pure-ASGI bearer auth in front of the streamable-HTTP app.
 
@@ -903,7 +972,8 @@ class BearerAuthMiddleware:
     debugging from inside npm-network wants.
 
     GET /health stays unauthenticated so a poller can say "up"
-    without holding the token; it says nothing else.
+    without holding the token; it says nothing else. GET /ready does the
+    same and adds whether SearXNG answers, on a short timeout.
     """
 
     def __init__(self, app, token: str | None):
@@ -930,6 +1000,14 @@ class BearerAuthMiddleware:
             from starlette.responses import JSONResponse
 
             response = JSONResponse({"status": "ok"})
+            await response(scope, receive, send)
+            return
+
+        if scope.get("path") == READY_PATH:
+            from starlette.responses import JSONResponse
+
+            body, status_code = await _readiness()
+            response = JSONResponse(body, status_code=status_code)
             await response(scope, receive, send)
             return
 

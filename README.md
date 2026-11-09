@@ -43,7 +43,9 @@ podman run -e SEARXNG_MCP_TOKEN=<token> -p 8000:8000 localhost/searxng-mcp:lates
 
 It listens on `0.0.0.0:8000` and serves streamable HTTP at `/mcp`. `GET /health`
 is unauthenticated and answers `{"status":"ok"}` — nothing more, so a poller can
-say "up" without holding the token.
+say "up" without holding the token. `GET /ready` is unauthenticated too and adds
+whether SearXNG answers (its `/healthz` at the origin of `SEARXNG_URL`): `200`
+when it does, `503` with the reason when it does not.
 
 The deployed container runs as `nobody` behind a rootless quadlet. Its unit and
 env wiring are owned by the separate

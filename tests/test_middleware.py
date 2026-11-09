@@ -205,3 +205,109 @@ def test_anonymous_serves_everything(monkeypatch) -> None:
     inner = Reached()
     _call(inner, _scope(), token=None)
     assert inner.reached
+
+
+# --- /ready -----------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _clear_ready_cache():
+    """The readiness answer is a module global; start every test cold."""
+    server._ready_cache = None
+    server._ready_lock = None
+    yield
+    server._ready_cache = None
+    server._ready_lock = None
+
+
+def test_ready_is_open_and_reports_the_engine(monkeypatch) -> None:
+    async def _ok() -> tuple[dict, int]:
+        return {"status": "ready", "searxng": "ok"}, 200
+
+    monkeypatch.setattr(server, "_probe_readiness", _ok)
+    status, body = _call(Reached(), _scope(path="/ready"))
+    assert status == 200
+    assert b'"ready"' in body
+
+
+def test_ready_reports_an_unready_engine_without_a_token(monkeypatch) -> None:
+    async def _bad() -> tuple[dict, int]:
+        return {"status": "unready", "error": "connection refused"}, 503
+
+    monkeypatch.setattr(server, "_probe_readiness", _bad)
+    status, body = _call(Reached(), _scope(path="/ready"))
+    assert status == 503
+    assert b"connection refused" in body
+
+
+def test_a_similar_path_is_not_ready() -> None:
+    assert _call(Reached(), _scope(path="/readyz"))[0] == 401
+
+
+class _HealthClient:
+    """A minimal stand-in for httpx2.Client in the readiness probe."""
+
+    def __init__(self, response) -> None:
+        self.response = response
+        self.urls: list[str] = []
+
+    def __enter__(self) -> _HealthClient:
+        return self
+
+    def __exit__(self, *exc) -> bool:
+        return False
+
+    def get(self, url: str):
+        self.urls.append(url)
+        return self.response
+
+
+def _set_health_client(monkeypatch, response) -> _HealthClient:
+    fake = _HealthClient(response)
+    monkeypatch.setattr(server.httpx2, "Client", lambda **kwargs: fake)
+    return fake
+
+
+def test_the_probe_asks_healthz_at_the_origin(monkeypatch) -> None:
+    from tests.fakes import FakeResponse
+
+    fake = _set_health_client(monkeypatch, FakeResponse(status_code=200))
+    body, status = anyio.run(server._probe_readiness)
+    assert (status, body) == (200, {"status": "ready", "searxng": "ok"})
+    assert fake.urls == [server.SEARXNG_HEALTH_URL]
+    assert fake.urls[0].endswith("/healthz")
+
+
+def test_the_probe_turns_a_bad_status_into_unready(monkeypatch) -> None:
+    from tests.fakes import FakeResponse
+
+    _set_health_client(monkeypatch, FakeResponse(status_code=503))
+    body, status = anyio.run(server._probe_readiness)
+    assert status == 503
+    assert body["status"] == "unready"
+
+
+def test_the_probe_turns_a_transport_error_into_unready(monkeypatch) -> None:
+    from tests.fakes import FakeResponse
+
+    class _Boom(_HealthClient):
+        def get(self, url: str):
+            raise OSError("connection refused")
+
+    monkeypatch.setattr(server.httpx2, "Client", lambda **kwargs: _Boom(FakeResponse()))
+    body, status = anyio.run(server._probe_readiness)
+    assert status == 503
+    assert "connection refused" in body["error"]
+
+
+def test_ready_is_cached_between_requests(monkeypatch) -> None:
+    calls = []
+
+    async def _ok() -> tuple[dict, int]:
+        calls.append(1)
+        return {"status": "ready", "searxng": "ok"}, 200
+
+    monkeypatch.setattr(server, "_probe_readiness", _ok)
+    anyio.run(server._readiness)
+    anyio.run(server._readiness)
+    assert len(calls) == 1

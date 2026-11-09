@@ -20,7 +20,7 @@ uv run ruff check .            # lint (CI gate). No `ruff format` step; line-len
 uv run pyright                 # typecheck (CI gate); config in [tool.pyright], standard mode, floor Python 3.12
 uv run pytest -q              # 186 tests, ~2s, no network
 uv run pytest tests/test_guard.py -q          # focused
-uv run python scripts/smoke.py               # boots the real app on a free loopback port: /health, 401s, handshake
+uv run python scripts/smoke.py               # boots the real app on a free loopback port: /health, /ready, 401s, handshake
 uv run --python 3.14 pytest -q                # against the image's Python (base is 3.14-alpine; >=3.12, CI matrix 3.12+3.14)
 uv add <pkg>                   # edits pyproject.toml AND re-locks — always commit the uv.lock change
 uv export --format requirements-txt --no-dev --no-emit-project --locked -o /tmp/r.txt   # what the image installs
@@ -60,7 +60,9 @@ not here — this repo ships only code, tests, CI and `Containerfile`.
 - The deployed server is wired into `~/.config/opencode/opencode.json` as a
   remote MCP entry (currently `http://192.168.1.112:8000/mcp` with a bearer
   token). `/health` is open and answers exactly `{"status":"ok"}`; any other
-  JSON means you reached a different service on port 8000.
+  JSON means you reached a different service on port 8000. `/ready` is open
+  too and adds whether SearXNG answers (its `/healthz` at the origin of
+  `SEARXNG_URL`): 200 or 503. It must never become the unit's `HealthCmd`.
 - The runtime is owned by the `stack` repo, not here: that repo defines this
   server's quadlet unit, the shared `npm-network`, its env file(s) and the
   SearXNG instance/settings. Treat it as the source of truth for anything
